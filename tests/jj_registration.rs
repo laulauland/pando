@@ -117,9 +117,9 @@ fn simple_cow_copies_uncommitted_files_but_base_remains_parent() {
         canonical_parent,
         "dirty canonical workspaces still base pando @ on canonical @-"
     );
-    // Documented SimpleCowBackend limitation: uncommitted source file contents
-    // are copied into the Pando workspace, so only the jj base is cleanly
-    // anchored at canonical @-; the new workspace diff can still be dirty.
+    // Current copy-on-create behavior includes uncommitted source file contents
+    // in the Pando workspace, so only the jj base is cleanly anchored at
+    // canonical @-; the new workspace diff can still be dirty.
     assert_diff_summary_contains(&workspace, "file.txt");
 }
 

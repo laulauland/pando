@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Manual V1 CLI acceptance smoke test.
+# Manual CLI acceptance smoke test.
 # Uses the real platform backend selected by the binary. On Linux this may require
 # overlayfs mount privileges; on macOS it exercises APFS clonefile.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/pando-v1-acceptance.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/pando-cli-acceptance.XXXXXX")"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
@@ -26,8 +26,8 @@ printf 'nested canonical\n' > "$SOURCE/nested/file.txt"
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml"
 PANDO="$ROOT/target/debug/pando"
 
-alpha="$($PANDO create alpha --from "$SOURCE")"
-beta="$($PANDO create beta --from "$SOURCE")"
+alpha="$(cd "$SOURCE" && $PANDO create alpha --from ignored-outside-jj)"
+beta="$(cd "$SOURCE" && $PANDO create beta --from ignored-outside-jj)"
 
 [[ -d "$alpha" ]] || { echo "alpha path was not created: $alpha" >&2; exit 1; }
 [[ -d "$beta" ]] || { echo "beta path was not created: $beta" >&2; exit 1; }
@@ -41,12 +41,14 @@ grep -q 'canonical' "$SOURCE/README.md"
 grep -q 'alpha' "$alpha/README.md"
 grep -q 'beta' "$beta/README.md"
 
-"$PANDO" list | grep -q $'alpha\t'
-"$PANDO" list | grep -q $'beta\t'
+list_output="$($PANDO list)"
+grep -q $'NAME\tAGE\tBASE\tJJ' <<< "$list_output"
+grep -q $'alpha\t.*\t-\t-' <<< "$list_output"
+grep -q $'beta\t.*\t-\t-' <<< "$list_output"
 "$PANDO" destroy alpha --keep-jj-workspace
 assert_missing "$PANDO_HOME/alpha"
 assert_exists "$PANDO_HOME/beta"
 "$PANDO" destroy beta
 assert_missing "$PANDO_HOME/beta"
 
-echo "V1 CLI acceptance passed."
+echo "CLI acceptance passed."

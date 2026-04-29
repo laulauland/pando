@@ -4,11 +4,16 @@ use crate::{
     lifecycle::{create_workspace, destroy_workspace, list_workspaces},
 };
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use std::env;
 
 #[derive(Debug, Parser)]
-#[command(name = "pando", version, about = "Lightweight workspace lifecycle CLI")]
+#[command(
+    name = "pando",
+    version,
+    about = "Create and manage isolated Pando workspaces"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -16,19 +21,19 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a V1 workspace from the current directory.
+    /// Create a Pando workspace from the current directory.
     Create {
         name: String,
-        /// jj revset to base the new workspace on. Ignored outside jj repositories.
+        /// Select the jj base revision for the new workspace. Ignored outside jj repositories.
         #[arg(long, value_name = "REVSET")]
         from: Option<String>,
     },
-    /// List known workspaces.
+    /// List Pando workspaces.
     List,
-    /// Destroy a workspace and its lifecycle state.
+    /// Destroy a Pando workspace and its state.
     Destroy {
         name: String,
-        /// Destroy Pando state without forgetting the native jj workspace.
+        /// Keep the native jj workspace registration while removing Pando state.
         #[arg(long)]
         keep_jj_workspace: bool,
     },
@@ -36,6 +41,23 @@ enum Command {
 
 pub fn run() -> Result<()> {
     run_from(Cli::parse())
+}
+
+fn short_commit(commit: &str) -> String {
+    commit.chars().take(12).collect()
+}
+
+fn format_age(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let age = now.signed_duration_since(created_at);
+    if age.num_days() > 0 {
+        format!("{}d", age.num_days())
+    } else if age.num_hours() > 0 {
+        format!("{}h", age.num_hours())
+    } else if age.num_minutes() > 0 {
+        format!("{}m", age.num_minutes())
+    } else {
+        format!("{}s", age.num_seconds().max(0))
+    }
 }
 
 fn run_from(cli: Cli) -> Result<()> {
@@ -50,8 +72,21 @@ fn run_from(cli: Cli) -> Result<()> {
             println!("{}", workspace_path.display());
         }
         Command::List => {
+            println!("NAME\tAGE\tBASE\tJJ");
             for metadata in list_workspaces(&home)? {
-                println!("{}\t{}", metadata.name, metadata.workspace_path.display());
+                let age = format_age(metadata.created_at, Utc::now());
+                let base = metadata
+                    .jj
+                    .as_ref()
+                    .and_then(|jj| jj.base_commit.as_deref())
+                    .map(short_commit)
+                    .unwrap_or_else(|| "-".to_owned());
+                let jj = metadata
+                    .jj
+                    .as_ref()
+                    .and_then(|jj| jj.workspace_name.as_deref())
+                    .unwrap_or("-");
+                println!("{}\t{}\t{}\t{}", metadata.name, age, base, jj);
             }
         }
         Command::Destroy {
@@ -67,7 +102,8 @@ fn run_from(cli: Cli) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{format_age, short_commit, Cli, Command};
+    use chrono::{Duration, Utc};
     use clap::Parser;
 
     #[test]
@@ -91,6 +127,17 @@ mod tests {
             Command::Create { from, .. } => assert_eq!(from, None),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn list_helpers_use_product_display_values() {
+        assert_eq!(short_commit("1234567890abcdef"), "1234567890ab");
+
+        let now = Utc::now();
+        assert_eq!(format_age(now - Duration::seconds(3), now), "3s");
+        assert_eq!(format_age(now - Duration::minutes(2), now), "2m");
+        assert_eq!(format_age(now - Duration::hours(4), now), "4h");
+        assert_eq!(format_age(now - Duration::days(5), now), "5d");
     }
 
     #[test]

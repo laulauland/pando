@@ -7,7 +7,7 @@ use pando::{
 use std::{fs, path::Path, process::Command};
 
 #[test]
-fn v1_create_list_destroy_lifecycle_is_end_to_end() {
+fn cli_create_list_destroy_lifecycle_is_end_to_end() {
     let source = tempfile::tempdir().unwrap();
     fs::create_dir(source.path().join("nested")).unwrap();
     fs::write(source.path().join("README.md"), "canonical").unwrap();
@@ -87,7 +87,7 @@ fn cli_create_ignores_from_revset_outside_jj_and_uses_current_dir() {
 }
 
 #[test]
-fn v1_two_named_workspaces_do_not_interfere() {
+fn cli_two_named_workspaces_do_not_interfere() {
     let source = tempfile::tempdir().unwrap();
     fs::write(source.path().join("shared.txt"), "canonical").unwrap();
 
