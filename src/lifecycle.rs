@@ -1,7 +1,8 @@
 use crate::{
     backend::CowBackend,
     home::{ensure_home, state_dir, PandoLock},
-    metadata::{read_metadata, write_metadata, Metadata},
+    jj::{has_jj_repo, register_pando_workspace},
+    metadata::{read_metadata, write_metadata, JjMetadata, Metadata},
     naming::validate_name,
 };
 use anyhow::{bail, Result};
@@ -27,10 +28,20 @@ pub fn create_workspace<B: CowBackend>(
 
     let state_dir = state_dir(home, name);
     let workspace_path = backend.create(&state_dir, &source)?;
-    write_metadata(
-        &state_dir,
-        &Metadata::new(name, source, workspace_path.clone()),
-    )?;
+
+    let jj = if has_jj_repo(&source) {
+        let registration = register_pando_workspace(&source, &workspace_path, name)?;
+        Some(JjMetadata {
+            workspace_id: Some(registration.workspace_name),
+            operation_id: Some(registration.operation_id),
+        })
+    } else {
+        None
+    };
+
+    let mut metadata = Metadata::new(name, source, workspace_path.clone());
+    metadata.jj = jj;
+    write_metadata(&state_dir, &metadata)?;
     Ok(workspace_path)
 }
 

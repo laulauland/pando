@@ -11,6 +11,7 @@ dirs = "5.0"
 fs2 = "0.4"
 jj-lib = "=0.40.0"
 libc = "0.2"
+pollster = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 

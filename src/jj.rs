@@ -1,12 +1,24 @@
-use anyhow::{bail, Result};
-use std::path::{Path, PathBuf};
+use anyhow::{bail, Context, Result};
+use jj_lib::{
+    config::StackedConfig,
+    object_id::ObjectId,
+    ref_name::{WorkspaceName, WorkspaceNameBuf},
+    repo::{Repo as _, StoreFactories},
+    settings::UserSettings,
+    workspace::{default_working_copy_factories, default_working_copy_factory, Workspace},
+};
+use pollster::FutureExt as _;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-/// Minimal jj filesystem checks for future workspace registration.
+/// Minimal jj filesystem checks for workspace registration.
 ///
-/// These helpers do not load or modify a jj repository. Pando treats the
-/// canonical root as jj-backed only when the root itself contains `.jj/`. We
-/// intentionally do not walk parents: workspaces are created for an explicit
-/// canonical directory, and later registration work needs that exact root.
+/// Pando treats the canonical root as jj-backed only when the root itself
+/// contains `.jj/`. We intentionally do not walk parents: workspaces are
+/// created for an explicit canonical directory, and registration needs that
+/// exact root.
 pub fn has_jj_repo(canonical_root: &Path) -> bool {
     canonical_root.join(".jj").is_dir()
 }
@@ -31,46 +43,137 @@ pub fn canonical_jj_root(canonical_root: &Path) -> Result<JjCanonicalRoot> {
     Ok(JjCanonicalRoot { path })
 }
 
-/// Compile-time guard for the jj-lib 0.40 APIs expected by later registration
-/// work.
-///
-/// The actual register/forget flow is intentionally not implemented here. This
-/// keeps the dependency pinned to the workspace-loading and workspace-store API
-/// shape without constructing a repository or touching user data.
-#[allow(dead_code)]
-fn _jj_lib_040_api_guard() {
-    let _: fn(
-        &jj_lib::settings::UserSettings,
-        &Path,
-        &jj_lib::repo::StoreFactories,
-        &jj_lib::workspace::WorkingCopyFactories,
-    ) -> Result<jj_lib::workspace::Workspace, jj_lib::workspace::WorkspaceLoadError> =
-        jj_lib::workspace::Workspace::load;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JjRegistration {
+    pub workspace_name: String,
+    pub operation_id: String,
+}
 
-    let _: fn(
-        &Path,
-    ) -> Result<
-        jj_lib::workspace_store::SimpleWorkspaceStore,
-        jj_lib::workspace_store::WorkspaceStoreError,
-    > = jj_lib::workspace_store::SimpleWorkspaceStore::load;
-    let _: fn(
-        &jj_lib::workspace_store::SimpleWorkspaceStore,
-        &jj_lib::ref_name::WorkspaceName,
-        &Path,
-    ) -> Result<(), jj_lib::workspace_store::WorkspaceStoreError> =
-        <jj_lib::workspace_store::SimpleWorkspaceStore as jj_lib::workspace_store::WorkspaceStore>::add;
-    let _: fn(
-        &jj_lib::workspace_store::SimpleWorkspaceStore,
-        &[&jj_lib::ref_name::WorkspaceName],
-    ) -> Result<(), jj_lib::workspace_store::WorkspaceStoreError> =
-        <jj_lib::workspace_store::SimpleWorkspaceStore as jj_lib::workspace_store::WorkspaceStore>::forget;
-    let _: fn(&str) -> &jj_lib::ref_name::WorkspaceName = jj_lib::ref_name::WorkspaceName::new;
-    let _: fn(&jj_lib::ref_name::WorkspaceName) -> &str = jj_lib::ref_name::WorkspaceName::as_str;
+pub fn pando_workspace_name(name: &str) -> String {
+    format!("pando-{name}")
+}
+
+/// Register `workspace_root` as a native jj workspace in `canonical_root`'s repo.
+///
+/// This uses jj-lib's public `Workspace::init_workspace_with_existing_repo()`
+/// API, which creates an initial "add workspace" operation at the root commit.
+/// We then create a second operation to move the pando workspace's `@` to a
+/// fresh working-copy commit based on the canonical workspace's current `@`
+/// parent. This is intentionally two op-log entries for readability and API
+/// stability in the first native registration implementation.
+pub fn register_pando_workspace(
+    canonical_root: &Path,
+    workspace_root: &Path,
+    name: &str,
+) -> Result<JjRegistration> {
+    let canonical_root = canonical_jj_root(canonical_root)?;
+    let workspace_root = workspace_root.canonicalize().with_context(|| {
+        format!(
+            "could not canonicalize pando workspace root: {}",
+            workspace_root.display()
+        )
+    })?;
+
+    // Cow backends copy or expose the canonical `.jj`. Replace that with a
+    // pando-local `.jj` directory pointing at the existing canonical repo.
+    let copied_jj_dir = workspace_root.join(".jj");
+    if copied_jj_dir.exists() {
+        fs::remove_dir_all(&copied_jj_dir).with_context(|| {
+            format!(
+                "could not remove copied jj directory before registration: {}",
+                copied_jj_dir.display()
+            )
+        })?;
+    }
+
+    let settings = UserSettings::from_config(StackedConfig::with_defaults())?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let canonical_workspace = Workspace::load(
+        &settings,
+        canonical_root.path(),
+        &store_factories,
+        &wc_factories,
+    )
+    .with_context(|| {
+        format!(
+            "could not load canonical jj workspace: {}",
+            canonical_root.path().display()
+        )
+    })?;
+    let canonical_repo = canonical_workspace
+        .repo_loader()
+        .load_at_head()
+        .block_on()?;
+    let repo_path = canonical_workspace.repo_path().to_path_buf();
+    let workspace_name = WorkspaceNameBuf::from(pando_workspace_name(name));
+
+    let (mut pando_workspace, repo_after_init) = Workspace::init_workspace_with_existing_repo(
+        &workspace_root,
+        &repo_path,
+        &canonical_repo,
+        &*default_working_copy_factory(),
+        workspace_name.clone(),
+    )
+    .block_on()
+    .with_context(|| {
+        format!(
+            "could not initialize jj workspace {} at {}",
+            workspace_name.as_symbol(),
+            workspace_root.display()
+        )
+    })?;
+
+    let base_commit = default_base_commit(&canonical_repo, canonical_workspace.workspace_name())?;
+    let mut tx = repo_after_init.start_transaction();
+    let wc_commit = tx
+        .repo_mut()
+        .check_out(workspace_name.clone(), &base_commit)
+        .block_on()?;
+    let repo = tx
+        .commit(format!(
+            "set pando workspace '{}' base",
+            workspace_name.as_symbol()
+        ))
+        .block_on()?;
+
+    // Make the working-copy state agree with the selected commit. The physical
+    // files are already supplied by the COW backend; checkout reconciles jj's
+    // recorded tree state with the working-copy commit.
+    pando_workspace
+        .check_out(repo.op_id().clone(), None, &wc_commit)
+        .block_on()?;
+
+    Ok(JjRegistration {
+        workspace_name: workspace_name.as_str().to_owned(),
+        operation_id: repo.op_id().hex(),
+    })
+}
+
+fn default_base_commit(
+    repo: &std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
+    canonical_workspace_name: &WorkspaceName,
+) -> Result<jj_lib::commit::Commit> {
+    let wc_commit_id = repo
+        .view()
+        .get_wc_commit_id(canonical_workspace_name)
+        .with_context(|| {
+            format!(
+                "canonical workspace '{}' has no working-copy commit",
+                canonical_workspace_name.as_symbol()
+            )
+        })?;
+    let wc_commit = repo.store().get_commit(wc_commit_id)?;
+    let parent_ids = wc_commit.parent_ids();
+    let base_id = parent_ids
+        .first()
+        .unwrap_or_else(|| repo.store().root_commit_id());
+    Ok(repo.store().get_commit(base_id)?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_jj_root, has_jj_repo};
+    use super::{canonical_jj_root, has_jj_repo, pando_workspace_name};
     use std::fs;
 
     #[test]
@@ -90,5 +193,10 @@ mod tests {
         fs::create_dir(dir.path().join(".jj")).unwrap();
         let root = canonical_jj_root(dir.path()).unwrap();
         assert_eq!(root.path(), dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn formats_pando_workspace_name() {
+        assert_eq!(pando_workspace_name("foo"), "pando-foo");
     }
 }
