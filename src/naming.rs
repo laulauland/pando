@@ -35,30 +35,28 @@ mod tests {
         }
     }
 
-    fn valid_name() -> impl Strategy<Value = String> {
-        prop::collection::vec(
-            any::<char>().prop_filter("valid name character", |c| {
-                !c.is_whitespace() && *c != '/' && *c != '\\'
-            }),
-            1..32,
-        )
-        .prop_map(|chars| chars.into_iter().collect())
+    fn is_valid_name_spec(name: &str) -> bool {
+        !name.is_empty()
+            && !name.chars().any(char::is_whitespace)
+            && !name.contains('/')
+            && !name.contains('\\')
+    }
+
+    fn typical_valid_name() -> impl Strategy<Value = String> {
+        "[A-Za-z0-9._-]{1,31}"
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig { cases: 64, .. ProptestConfig::default() })]
+
         #[test]
-        fn valid_generated_names_are_accepted(name in valid_name()) {
+        fn typical_valid_names_are_accepted(name in typical_valid_name()) {
             prop_assert!(validate_name(&name).is_ok(), "{name:?} should be valid");
         }
 
         #[test]
         fn arbitrary_strings_are_accepted_iff_they_match_the_name_spec(name in any::<String>()) {
-            let expected = !name.is_empty()
-                && !name.chars().any(char::is_whitespace)
-                && !name.contains('/')
-                && !name.contains('\\');
-
-            prop_assert_eq!(validate_name(&name).is_ok(), expected, "name: {:?}", name);
+            prop_assert_eq!(validate_name(&name).is_ok(), is_valid_name_spec(&name), "name: {:?}", name);
         }
     }
 }

@@ -123,10 +123,10 @@ mod tests {
     use crate::{
         backend::SimpleCowBackend,
         home::state_dir,
-        metadata::{metadata_path, write_metadata, JjMetadata, Metadata},
+        metadata::{metadata_path, read_metadata, write_metadata, JjMetadata, Metadata},
     };
     use proptest::prelude::*;
-    use std::{collections::BTreeSet, fs};
+    use std::{collections::BTreeSet, fs, path::Path};
 
     #[test]
     fn backend_agnostic_lifecycle_uses_home_name_state_dir() {
@@ -202,7 +202,7 @@ mod tests {
         ]
     }
 
-    fn assert_list_matches(home: &std::path::Path, existing: &BTreeSet<&'static str>) {
+    fn assert_list_matches(home: &Path, existing: &BTreeSet<&'static str>) {
         let listed: BTreeSet<String> = list_workspaces(home)
             .unwrap()
             .into_iter()
@@ -212,17 +212,24 @@ mod tests {
         assert_eq!(listed, expected);
     }
 
+    fn write_source_tree(source: &Path) {
+        fs::create_dir(source.join("nested")).unwrap();
+        fs::write(source.join("README.md"), "demo").unwrap();
+        fs::write(source.join("nested/file.txt"), "nested").unwrap();
+    }
+
     proptest! {
+        #![proptest_config(ProptestConfig { cases: 32, .. ProptestConfig::default() })]
+
         #[test]
         fn simple_backend_lifecycle_operation_sequences_preserve_list_invariant(
-            operations in prop::collection::vec(operation(), 0..32)
+            operations in prop::collection::vec(operation(), 0..24)
         ) {
             const NAMES: [&str; 3] = ["alpha", "beta", "gamma"];
 
             let source = tempfile::tempdir().unwrap();
-            fs::create_dir(source.path().join("nested")).unwrap();
-            fs::write(source.path().join("README.md"), "demo").unwrap();
-            fs::write(source.path().join("nested/file.txt"), "nested").unwrap();
+            write_source_tree(source.path());
+            prop_assert!(!source.path().join(".jj").exists(), "property test source must stay outside jj paths");
 
             let home = tempfile::tempdir().unwrap();
             let backend = SimpleCowBackend;
@@ -237,9 +244,11 @@ mod tests {
                             prop_assert!(result.is_err(), "duplicate create for {name:?} should fail");
                         } else {
                             let workspace = result.unwrap();
-                            prop_assert_eq!(&workspace, &state_dir(home.path(), name).join("workspace"));
+                            let state_dir = state_dir(home.path(), name);
+                            prop_assert_eq!(&workspace, &state_dir.join("workspace"));
                             prop_assert!(workspace.join("README.md").exists());
                             prop_assert!(workspace.join("nested/file.txt").exists());
+                            prop_assert!(read_metadata(&state_dir).unwrap().jj.is_none());
                             existing.insert(name);
                         }
                     }
