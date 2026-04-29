@@ -115,6 +115,16 @@ pub fn register_pando_workspace(
         .block_on()?;
     let repo_path = canonical_workspace.repo_path().to_path_buf();
     let workspace_name = WorkspaceNameBuf::from(pando_workspace_name(name));
+    let base_commit = match from_revset {
+        Some(revset) => resolve_single_revset_commit(
+            &canonical_repo,
+            canonical_root.path(),
+            canonical_workspace.workspace_name(),
+            &settings,
+            revset,
+        )?,
+        None => default_base_commit(&canonical_repo, canonical_workspace.workspace_name())?,
+    };
 
     let (mut pando_workspace, repo_after_init) = Workspace::init_workspace_with_existing_repo(
         &workspace_root,
@@ -132,16 +142,6 @@ pub fn register_pando_workspace(
         )
     })?;
 
-    let base_commit = match from_revset {
-        Some(revset) => resolve_single_revset_commit(
-            &canonical_repo,
-            canonical_root.path(),
-            canonical_workspace.workspace_name(),
-            &settings,
-            revset,
-        )?,
-        None => default_base_commit(&canonical_repo, canonical_workspace.workspace_name())?,
-    };
     let mut tx = repo_after_init.start_transaction();
     let repo_mut = tx.repo_mut();
     let wc_commit = repo_mut
@@ -243,24 +243,18 @@ fn resolve_single_revset_commit(
     let evaluated = resolved
         .evaluate(repo.as_ref())
         .with_context(|| format!("could not evaluate jj revset '{revset}'"))?;
-    let mut ids = evaluated.iter();
-    let Some(id) = ids
-        .next()
-        .transpose()
-        .with_context(|| format!("could not evaluate jj revset '{revset}'"))?
-    else {
-        bail!("jj revset '{revset}' resolved to no commits");
-    };
-    if ids
-        .next()
-        .transpose()
-        .with_context(|| format!("could not evaluate jj revset '{revset}'"))?
-        .is_some()
-    {
-        bail!("jj revset '{revset}' resolved to more than one commit");
-    }
+    let ids: Vec<_> = evaluated
+        .iter()
+        .take(2)
+        .collect::<std::result::Result<_, _>>()
+        .with_context(|| format!("could not evaluate jj revset '{revset}'"))?;
 
-    Ok(repo.store().get_commit(&id)?)
+    match ids.as_slice() {
+        [] => bail!("jj revset '{revset}' resolved to no commits"),
+        [id] => Ok(repo.store().get_commit(id)?),
+        [_, _] => bail!("jj revset '{revset}' resolved to more than one commit"),
+        _ => unreachable!("only two revset ids were collected"),
+    }
 }
 
 fn default_base_commit(

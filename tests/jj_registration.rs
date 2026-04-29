@@ -156,6 +156,31 @@ fn create_from_revset_bases_workspace_at_requested_revision() {
     );
 }
 
+#[test]
+fn create_from_multi_commit_revset_fails_without_registering_workspace() {
+    if skip_if_jj_unavailable("jj create --from failure integration test") {
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    init_jj_repo_with_two_commits_and_empty_wc(source.path());
+    let home = tempfile::tempdir().unwrap();
+
+    let create = Command::new(env!("CARGO_BIN_EXE_pando"))
+        .args(["create", "bad-from", "--from", "all()"])
+        .env("PANDO_HOME", home.path())
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        !create.status.success(),
+        "pando create --from all() should fail because it resolves multiple commits"
+    );
+    assert!(!state_dir(home.path(), "bad-from").exists());
+    assert_workspace_list_contains(source.path(), "pando-bad-from", false);
+}
+
 fn init_jj_repo(path: &Path) {
     let output = jj_command(&["git", "init", "--no-colocate"])
         .arg(path)
