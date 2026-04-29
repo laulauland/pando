@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use pando::{
-    backend::FsCowBackend,
+    backend::PlatformCowBackend,
     home::pando_home,
     lifecycle::{create_workspace, destroy_workspace, list_workspaces},
 };
@@ -32,7 +32,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let home = pando_home()?;
-    let backend = FsCowBackend;
+    let backend = PlatformCowBackend::default();
 
     match cli.command {
         Command::Create { name, from } => {
