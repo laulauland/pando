@@ -11,7 +11,7 @@ use std::env;
 #[derive(Debug, Parser)]
 #[command(
     name = "pando",
-    version,
+    disable_version_flag = true,
     about = "Create and manage isolated Pando workspaces"
 )]
 pub struct Cli {
@@ -33,7 +33,7 @@ enum Command {
     /// Destroy a Pando workspace and its state.
     Destroy {
         name: String,
-        /// Keep the native jj workspace registration while removing Pando state.
+        /// Keep the jj workspace while removing Pando state.
         #[arg(long)]
         keep_jj_workspace: bool,
     },
@@ -104,7 +104,7 @@ fn run_from(cli: Cli) -> Result<()> {
 mod tests {
     use super::{format_age, short_commit, Cli, Command};
     use chrono::{Duration, Utc};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn create_accepts_name_and_optional_from_revset() {
@@ -154,5 +154,15 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn help_avoids_version_and_implementation_details() {
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+
+        assert!(!help.contains("--version"));
+        assert!(!help.contains("implementation"));
+        assert!(!help.contains("native"));
     }
 }
