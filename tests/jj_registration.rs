@@ -6,27 +6,32 @@ use pando::{
 };
 use std::{fs, path::Path, process::Command};
 
-fn jj_available() -> bool {
-    Command::new("jj")
+const TEST_USER_NAME: &str = "Pando Test";
+const TEST_USER_EMAIL: &str = "pando@example.invalid";
+
+fn skip_if_jj_unavailable(test_name: &str) -> bool {
+    let available = Command::new("jj")
         .arg("--version")
         .output()
         .map(|output| output.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+
+    if !available {
+        eprintln!("skipping {test_name}: jj binary not found");
+    }
+
+    !available
 }
 
 #[test]
-fn cli_create_registers_native_jj_workspace_and_clean_status() {
-    if !jj_available() {
-        eprintln!("skipping jj registration integration test: jj binary not found");
+fn cli_create_registers_native_jj_workspace_and_clean_diff() {
+    if skip_if_jj_unavailable("jj registration integration test") {
         return;
     }
 
     let source = tempfile::tempdir().unwrap();
     init_jj_repo_with_base_and_empty_wc(source.path());
-    let canonical_parent = jj_stdout(
-        source.path(),
-        &["log", "--no-graph", "-r", "@-", "-T", "commit_id"],
-    );
+    let canonical_parent = jj_commit_id(source.path(), "@-");
     let home = tempfile::tempdir().unwrap();
 
     let create = Command::new(env!("CARGO_BIN_EXE_pando"))
@@ -46,27 +51,19 @@ fn cli_create_registers_native_jj_workspace_and_clean_status() {
 
     assert_workspace_list_contains(source.path(), "pando-foo", true);
     assert_eq!(
-        jj_stdout(
-            &workspace,
-            &["log", "--no-graph", "-r", "@-", "-T", "commit_id"]
-        ),
+        jj_commit_id(&workspace, "@-"),
         canonical_parent,
         "pando workspace @ should be based on canonical @- by default"
     );
-    assert_clean_status(&workspace);
+    assert_clean_diff(&workspace);
 
     fs::write(workspace.join("file.txt"), "workspace edit\n").unwrap();
-    let dirty_status = jj_stdout(&workspace, &["st"]);
-    assert!(
-        dirty_status.contains("Working copy changes") && dirty_status.contains("file.txt"),
-        "editing files in pando workspace should be visible to jj st:\n{dirty_status}"
-    );
+    assert_diff_summary_contains(&workspace, "file.txt");
 }
 
 #[test]
 fn destroy_forgets_native_jj_workspace_by_default() {
-    if !jj_available() {
-        eprintln!("skipping jj destroy integration test: jj binary not found");
+    if skip_if_jj_unavailable("jj destroy integration test") {
         return;
     }
 
@@ -85,8 +82,7 @@ fn destroy_forgets_native_jj_workspace_by_default() {
 
 #[test]
 fn destroy_keep_jj_workspace_preserves_native_jj_workspace() {
-    if !jj_available() {
-        eprintln!("skipping jj destroy keep integration test: jj binary not found");
+    if skip_if_jj_unavailable("jj destroy keep integration test") {
         return;
     }
 
@@ -102,52 +98,43 @@ fn destroy_keep_jj_workspace_preserves_native_jj_workspace() {
 }
 
 #[test]
-fn canonical_uncommitted_changes_are_copied_but_base_remains_parent() {
-    if !jj_available() {
-        eprintln!("skipping jj dirty canonical integration test: jj binary not found");
+fn simple_cow_copies_uncommitted_files_but_base_remains_parent() {
+    if skip_if_jj_unavailable("jj dirty canonical integration test") {
         return;
     }
 
     let source = tempfile::tempdir().unwrap();
     init_jj_repo_with_base_and_empty_wc(source.path());
     fs::write(source.path().join("file.txt"), "canonical dirty edit\n").unwrap();
-    let canonical_parent = jj_stdout(
-        source.path(),
-        &["log", "--no-graph", "-r", "@-", "-T", "commit_id"],
-    );
+    let canonical_parent = jj_commit_id(source.path(), "@-");
     let home = tempfile::tempdir().unwrap();
 
     let workspace = create_workspace(home.path(), &SimpleCowBackend, "foo", source.path()).unwrap();
 
     assert_eq!(
-        jj_stdout(
-            &workspace,
-            &["log", "--no-graph", "-r", "@-", "-T", "commit_id"]
-        ),
+        jj_commit_id(&workspace, "@-"),
         canonical_parent,
         "dirty canonical workspaces still base pando @ on canonical @-"
     );
-    let status = jj_stdout(&workspace, &["st"]);
-    assert!(
-        status.contains("Working copy changes") && status.contains("file.txt"),
-        "documented limitation: SimpleCowBackend copies canonical uncommitted file contents, so jj st is not clean:\n{status}"
-    );
+    // Documented SimpleCowBackend limitation: uncommitted source file contents
+    // are copied into the Pando workspace, so only the jj base is cleanly
+    // anchored at canonical @-; the new workspace diff can still be dirty.
+    assert_diff_summary_contains(&workspace, "file.txt");
 }
 
 #[test]
-#[ignore = "TODO(PANDO-kgnuhuxw): --from currently accepts a filesystem path only, not a jj revset"]
+#[ignore = "TODO(PANDO-kgnuhuxw): pando create --from currently accepts a source directory path, not a jj revset"]
 fn create_from_revset_bases_workspace_at_requested_revision() {
     // Once `pando create --from <REVSET>` is implemented for jj repos, assert
     // that the created workspace's `@-` equals the requested revision.
 }
 
 fn init_jj_repo(path: &Path) {
-    let init = Command::new("jj")
-        .args(["git", "init", "--no-colocate"])
+    let output = jj_command(&["git", "init", "--no-colocate"])
         .arg(path)
         .output()
         .unwrap();
-    assert_success("jj git init", &init);
+    assert_success("jj git init", &output);
 }
 
 fn init_jj_repo_with_base_and_empty_wc(path: &Path) {
@@ -160,39 +147,62 @@ fn init_jj_repo_with_base_and_empty_wc(path: &Path) {
 
 fn assert_workspace_list_contains(repo: &Path, workspace: &str, expected: bool) {
     let stdout = jj_stdout(repo, &["workspace", "list"]);
+    let found = stdout.lines().any(|line| {
+        line.strip_prefix(workspace)
+            .is_some_and(|rest| rest.starts_with(':'))
+    });
+
     assert_eq!(
-        stdout.contains(workspace),
-        expected,
+        found, expected,
         "workspace list expectation for {workspace}={expected} failed:\n{stdout}"
     );
 }
 
-fn assert_clean_status(repo: &Path) {
-    let stdout = jj_stdout(repo, &["st"]);
+fn assert_clean_diff(repo: &Path) {
+    let summary = jj_stdout(repo, &["diff", "--summary"]);
     assert!(
-        stdout.contains("The working copy has no changes."),
-        "expected clean jj status in {}, got:\n{stdout}",
+        summary.trim().is_empty(),
+        "expected clean jj diff in {}, got:\n{summary}",
+        repo.display()
+    );
+}
+
+fn assert_diff_summary_contains(repo: &Path, path: &str) {
+    let summary = jj_stdout(repo, &["diff", "--summary"]);
+    assert!(
+        summary.lines().any(|line| line.ends_with(path)),
+        "expected jj diff summary in {} to mention {path}, got:\n{summary}",
         repo.display()
     );
 }
 
 fn jj_success(repo: &Path, args: &[&str]) {
-    let output = Command::new("jj")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .unwrap();
+    let output = jj_command(args).current_dir(repo).output().unwrap();
     assert_success(&format!("jj {}", args.join(" ")), &output);
 }
 
+fn jj_commit_id(repo: &Path, revset: &str) -> String {
+    jj_stdout(
+        repo,
+        &["log", "--no-graph", "-r", revset, "-T", "commit_id"],
+    )
+}
+
 fn jj_stdout(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("jj")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .unwrap();
+    let output = jj_command(args).current_dir(repo).output().unwrap();
     assert_success(&format!("jj {}", args.join(" ")), &output);
     String::from_utf8(output.stdout).unwrap()
+}
+
+fn jj_command(args: &[&str]) -> Command {
+    let mut command = Command::new("jj");
+    command
+        .arg("--config")
+        .arg(format!("user.name={TEST_USER_NAME}"))
+        .arg("--config")
+        .arg(format!("user.email={TEST_USER_EMAIL}"))
+        .args(args);
+    command
 }
 
 fn assert_success(command: &str, output: &std::process::Output) {
