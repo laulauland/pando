@@ -1,4 +1,7 @@
-use pando::{backend::SimpleCowBackend, home::state_dir, lifecycle::create_workspace, metadata::read_metadata};
+use pando::{
+    backend::SimpleCowBackend, home::state_dir, lifecycle::create_workspace,
+    metadata::read_metadata,
+};
 use std::process::Command;
 
 fn jj_available() -> bool {

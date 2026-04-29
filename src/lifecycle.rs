@@ -5,7 +5,7 @@ use crate::{
     metadata::{read_metadata, write_metadata, JjMetadata, Metadata},
     naming::validate_name,
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -29,20 +29,39 @@ pub fn create_workspace<B: CowBackend>(
     let state_dir = state_dir(home, name);
     let workspace_path = backend.create(&state_dir, &source)?;
 
-    let jj = if has_jj_repo(&source) {
-        let registration = register_pando_workspace(&source, &workspace_path, name)?;
-        Some(JjMetadata {
-            workspace_id: Some(registration.workspace_name),
-            operation_id: Some(registration.operation_id),
-        })
-    } else {
-        None
+    let jj = match register_jj_if_needed(&source, &workspace_path, name) {
+        Ok(jj) => jj,
+        Err(err) => {
+            backend.destroy(&state_dir).with_context(|| {
+                format!(
+                    "jj registration failed ({err:#}); additionally failed to clean up state dir {}",
+                    state_dir.display()
+                )
+            })?;
+            return Err(err);
+        }
     };
 
     let mut metadata = Metadata::new(name, source, workspace_path.clone());
     metadata.jj = jj;
     write_metadata(&state_dir, &metadata)?;
     Ok(workspace_path)
+}
+
+fn register_jj_if_needed(
+    source: &Path,
+    workspace_path: &Path,
+    name: &str,
+) -> Result<Option<JjMetadata>> {
+    if !has_jj_repo(source) {
+        return Ok(None);
+    }
+
+    let registration = register_pando_workspace(source, workspace_path, name)?;
+    Ok(Some(JjMetadata {
+        workspace_id: Some(registration.workspace_name),
+        operation_id: Some(registration.operation_id),
+    }))
 }
 
 pub fn destroy_workspace<B: CowBackend>(home: &Path, backend: &B, name: &str) -> Result<()> {
@@ -95,5 +114,21 @@ mod tests {
         destroy_workspace(home.path(), &backend, "demo").unwrap();
         assert!(!state_dir.exists());
         assert!(list_workspaces(home.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_cleans_up_state_dir_when_jj_registration_fails() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("README.md"), "demo").unwrap();
+        fs::create_dir(source.path().join(".jj")).unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        let backend = SimpleCowBackend;
+        let state_dir = state_dir(home.path(), "demo");
+
+        let result = create_workspace(home.path(), &backend, "demo", source.path());
+
+        assert!(result.is_err());
+        assert!(!state_dir.exists());
     }
 }

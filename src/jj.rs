@@ -126,10 +126,11 @@ pub fn register_pando_workspace(
 
     let base_commit = default_base_commit(&canonical_repo, canonical_workspace.workspace_name())?;
     let mut tx = repo_after_init.start_transaction();
-    let wc_commit = tx
-        .repo_mut()
+    let repo_mut = tx.repo_mut();
+    let wc_commit = repo_mut
         .check_out(workspace_name.clone(), &base_commit)
         .block_on()?;
+    repo_mut.rebase_descendants().block_on()?;
     let repo = tx
         .commit(format!(
             "set pando workspace '{}' base",
