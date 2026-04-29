@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manual V1 CLI acceptance/perf smoke test.
+# Manual V1 CLI acceptance smoke test.
 # Uses the real platform backend selected by the binary. On Linux this may require
 # overlayfs mount privileges; on macOS it exercises APFS clonefile.
 set -euo pipefail
@@ -8,6 +8,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/pando-v1-acceptance.XXXXXX")"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
+
+assert_exists() {
+  [[ -e "$1" ]] || { echo "missing expected path: $1" >&2; exit 1; }
+}
+
+assert_missing() {
+  [[ ! -e "$1" ]] || { echo "unexpected remaining path: $1" >&2; exit 1; }
+}
 
 export PANDO_HOME="$TMP/home"
 SOURCE="$TMP/source"
@@ -18,10 +26,8 @@ printf 'nested canonical\n' > "$SOURCE/nested/file.txt"
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml"
 PANDO="$ROOT/target/debug/pando"
 
-start_ns=$(date +%s%N)
 alpha="$($PANDO create alpha --from "$SOURCE")"
 beta="$($PANDO create beta --from "$SOURCE")"
-elapsed_ms=$(( ( $(date +%s%N) - start_ns ) / 1000000 ))
 
 [[ -d "$alpha" ]] || { echo "alpha path was not created: $alpha" >&2; exit 1; }
 [[ -d "$beta" ]] || { echo "beta path was not created: $beta" >&2; exit 1; }
@@ -35,12 +41,12 @@ grep -q 'canonical' "$SOURCE/README.md"
 grep -q 'alpha' "$alpha/README.md"
 grep -q 'beta' "$beta/README.md"
 
-$PANDO list | grep -q $'alpha\t'
-$PANDO list | grep -q $'beta\t'
-$PANDO destroy alpha --keep-jj-workspace
-[[ ! -e "$PANDO_HOME/alpha" ]] || { echo "alpha state dir remains" >&2; exit 1; }
-[[ -e "$PANDO_HOME/beta" ]] || { echo "beta state dir was removed" >&2; exit 1; }
-$PANDO destroy beta
-[[ ! -e "$PANDO_HOME/beta" ]] || { echo "beta state dir remains" >&2; exit 1; }
+"$PANDO" list | grep -q $'alpha\t'
+"$PANDO" list | grep -q $'beta\t'
+"$PANDO" destroy alpha --keep-jj-workspace
+assert_missing "$PANDO_HOME/alpha"
+assert_exists "$PANDO_HOME/beta"
+"$PANDO" destroy beta
+assert_missing "$PANDO_HOME/beta"
 
-echo "V1 CLI acceptance passed (${elapsed_ms}ms for two creates)."
+echo "V1 CLI acceptance passed."

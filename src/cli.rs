@@ -19,8 +19,8 @@ enum Command {
     /// Create a V1 workspace from a source directory.
     Create {
         name: String,
-        /// V1 source directory to copy/clone. Revset support is reserved for the V2 jj backend.
-        #[arg(long, default_value = ".", value_name = "REVSET")]
+        /// Source directory path to copy/clone. Defaults to the current directory.
+        #[arg(long, default_value = ".", value_name = "PATH")]
         from: PathBuf,
     },
     /// List known workspaces.
