@@ -1,12 +1,12 @@
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
-/// Minimal jj repository discovery for Pando's V2 integration.
+/// Minimal jj filesystem checks for future workspace registration.
 ///
-/// Pando treats the canonical root as a jj repository only when the root itself
-/// contains `.jj/`. We intentionally do not walk parents here: workspaces are
-/// created for an explicit canonical directory, and V2 registration needs that
-/// exact root.
+/// These helpers do not load or modify a jj repository. Pando treats the
+/// canonical root as jj-backed only when the root itself contains `.jj/`. We
+/// intentionally do not walk parents: workspaces are created for an explicit
+/// canonical directory, and later registration work needs that exact root.
 pub fn has_jj_repo(canonical_root: &Path) -> bool {
     canonical_root.join(".jj").is_dir()
 }
@@ -31,18 +31,41 @@ pub fn canonical_jj_root(canonical_root: &Path) -> Result<JjCanonicalRoot> {
     Ok(JjCanonicalRoot { path })
 }
 
-/// Compile-time guard for the jj-lib APIs the V2 implementation will use.
+/// Compile-time guard for the jj-lib 0.40 APIs expected by later registration
+/// work.
 ///
-/// The full workspace registration flow is implemented in later tickets. This
-/// helper exists so this crate is pinned to jj-lib 0.40 and the expected core
-/// types stay visible to the compiler while V1 behavior remains unchanged.
+/// The actual register/forget flow is intentionally not implemented here. This
+/// keeps the dependency pinned to the workspace-loading and workspace-store API
+/// shape without constructing a repository or touching user data.
 #[allow(dead_code)]
-fn _jj_lib_040_api_guard(
-    settings: &jj_lib::settings::UserSettings,
-    store: &jj_lib::repo_path::RepoPath,
-) {
-    let _ = settings;
-    let _ = store;
+fn _jj_lib_040_api_guard() {
+    let _: fn(
+        &jj_lib::settings::UserSettings,
+        &Path,
+        &jj_lib::repo::StoreFactories,
+        &jj_lib::workspace::WorkingCopyFactories,
+    ) -> Result<jj_lib::workspace::Workspace, jj_lib::workspace::WorkspaceLoadError> =
+        jj_lib::workspace::Workspace::load;
+
+    let _: fn(
+        &Path,
+    ) -> Result<
+        jj_lib::workspace_store::SimpleWorkspaceStore,
+        jj_lib::workspace_store::WorkspaceStoreError,
+    > = jj_lib::workspace_store::SimpleWorkspaceStore::load;
+    let _: fn(
+        &jj_lib::workspace_store::SimpleWorkspaceStore,
+        &jj_lib::ref_name::WorkspaceName,
+        &Path,
+    ) -> Result<(), jj_lib::workspace_store::WorkspaceStoreError> =
+        <jj_lib::workspace_store::SimpleWorkspaceStore as jj_lib::workspace_store::WorkspaceStore>::add;
+    let _: fn(
+        &jj_lib::workspace_store::SimpleWorkspaceStore,
+        &[&jj_lib::ref_name::WorkspaceName],
+    ) -> Result<(), jj_lib::workspace_store::WorkspaceStoreError> =
+        <jj_lib::workspace_store::SimpleWorkspaceStore as jj_lib::workspace_store::WorkspaceStore>::forget;
+    let _: fn(&str) -> &jj_lib::ref_name::WorkspaceName = jj_lib::ref_name::WorkspaceName::new;
+    let _: fn(&jj_lib::ref_name::WorkspaceName) -> &str = jj_lib::ref_name::WorkspaceName::as_str;
 }
 
 #[cfg(test)]
