@@ -1,40 +1,40 @@
 use anyhow::{bail, Context, Result};
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+const WORKSPACE_DIR: &str = "workspace";
 
 pub trait CowBackend {
-    fn create(&self, source: &Path, destination: &Path) -> Result<()>;
-    fn destroy(&self, workspace_path: &Path) -> Result<()>;
-    fn workspace_path(&self, name: &str) -> PathBuf;
+    fn create(&self, state_dir: &Path, source: &Path) -> Result<PathBuf>;
+    fn destroy(&self, state_dir: &Path) -> Result<()>;
+    fn workspace_path(&self, state_dir: &Path) -> PathBuf;
 }
 
-#[derive(Debug, Clone)]
-pub struct FsCowBackend {
-    workspaces_dir: PathBuf,
-}
-
-impl FsCowBackend {
-    pub fn new(workspaces_dir: PathBuf) -> Self {
-        Self { workspaces_dir }
-    }
-}
+#[derive(Debug, Clone, Default)]
+pub struct FsCowBackend;
 
 impl CowBackend for FsCowBackend {
-    fn create(&self, source: &Path, destination: &Path) -> Result<()> {
-        if destination.exists() {
-            bail!("workspace already exists: {}", destination.display());
+    fn create(&self, state_dir: &Path, source: &Path) -> Result<PathBuf> {
+        if state_dir.exists() {
+            bail!("workspace already exists: {}", state_dir.display());
         }
-        copy_recursively(source, destination)
+
+        let workspace_path = self.workspace_path(state_dir);
+        copy_recursively(source, &workspace_path)?;
+        Ok(workspace_path)
     }
 
-    fn destroy(&self, workspace_path: &Path) -> Result<()> {
-        if workspace_path.exists() {
-            fs::remove_dir_all(workspace_path)?;
+    fn destroy(&self, state_dir: &Path) -> Result<()> {
+        if state_dir.exists() {
+            fs::remove_dir_all(state_dir)?;
         }
         Ok(())
     }
 
-    fn workspace_path(&self, name: &str) -> PathBuf {
-        self.workspaces_dir.join(name)
+    fn workspace_path(&self, state_dir: &Path) -> PathBuf {
+        state_dir.join(WORKSPACE_DIR)
     }
 }
 
@@ -87,53 +87,28 @@ fn copy_symlink(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub struct MockBackend {
-    workspaces_dir: PathBuf,
-}
-
-impl MockBackend {
-    pub fn new(workspaces_dir: PathBuf) -> Self {
-        Self { workspaces_dir }
-    }
-}
-
-impl CowBackend for MockBackend {
-    fn create(&self, source: &Path, destination: &Path) -> Result<()> {
-        copy_recursively(source, destination)
-    }
-
-    fn destroy(&self, workspace_path: &Path) -> Result<()> {
-        if workspace_path.exists() {
-            fs::remove_dir_all(workspace_path)?;
-        }
-        Ok(())
-    }
-
-    fn workspace_path(&self, name: &str) -> PathBuf {
-        self.workspaces_dir.join(name)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CowBackend, MockBackend};
+    use super::{CowBackend, FsCowBackend};
     use std::fs;
 
     #[test]
-    fn mock_backend_copies_and_destroys_workspace() {
+    fn fs_backend_copies_and_destroys_workspace() {
         let source = tempfile::tempdir().unwrap();
         fs::create_dir(source.path().join("nested")).unwrap();
         fs::write(source.path().join("nested/file.txt"), "hello").unwrap();
 
-        let home = tempfile::tempdir().unwrap();
-        let backend = MockBackend::new(home.path().join("workspaces"));
-        let workspace = backend.workspace_path("copy");
+        let state_dir = tempfile::tempdir().unwrap().path().join("copy");
+        let backend = FsCowBackend;
 
-        backend.create(source.path(), &workspace).unwrap();
-        assert_eq!(fs::read_to_string(workspace.join("nested/file.txt")).unwrap(), "hello");
+        let workspace = backend.create(&state_dir, source.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("nested/file.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(workspace, backend.workspace_path(&state_dir));
 
-        backend.destroy(&workspace).unwrap();
-        assert!(!workspace.exists());
+        backend.destroy(&state_dir).unwrap();
+        assert!(!state_dir.exists());
     }
 }

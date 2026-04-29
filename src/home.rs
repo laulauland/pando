@@ -1,14 +1,20 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use fs2::FileExt;
-use std::{env, fs::{self, File, OpenOptions}, path::{Path, PathBuf}};
+use std::{
+    env,
+    fs::{self, File, OpenOptions},
+    path::{Path, PathBuf},
+};
 
 pub const PANDO_HOME_ENV: &str = "PANDO_HOME";
 const DEFAULT_RELATIVE_HOME: &str = ".local/state/pando";
 const LOCK_FILE: &str = ".lock";
-const WORKSPACES_DIR: &str = "workspaces";
 
 pub fn pando_home() -> Result<PathBuf> {
     if let Some(value) = env::var_os(PANDO_HOME_ENV) {
+        if value.is_empty() {
+            bail!("{PANDO_HOME_ENV} must not be empty");
+        }
         return Ok(PathBuf::from(value));
     }
 
@@ -17,12 +23,12 @@ pub fn pando_home() -> Result<PathBuf> {
 }
 
 pub fn ensure_home(home: &Path) -> Result<()> {
-    fs::create_dir_all(workspaces_dir(home))?;
+    fs::create_dir_all(home)?;
     Ok(())
 }
 
-pub fn workspaces_dir(home: &Path) -> PathBuf {
-    home.join(WORKSPACES_DIR)
+pub fn state_dir(home: &Path, name: &str) -> PathBuf {
+    home.join(name)
 }
 
 pub struct PandoLock {

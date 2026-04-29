@@ -1,2 +1,5 @@
 # Fiberplane local issue tracking
 .fp/
+
+# Rust build artifacts
+target/

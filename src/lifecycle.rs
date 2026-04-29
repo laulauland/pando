@@ -1,11 +1,14 @@
 use crate::{
     backend::CowBackend,
-    home::{ensure_home, workspaces_dir, PandoLock},
+    home::{ensure_home, state_dir, PandoLock},
     metadata::{read_metadata, write_metadata, Metadata},
     naming::validate_name,
 };
 use anyhow::{bail, Result};
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub fn create_workspace<B: CowBackend>(
     home: &Path,
@@ -22,27 +25,29 @@ pub fn create_workspace<B: CowBackend>(
         bail!("source must be a directory: {}", source.display());
     }
 
-    let workspace = backend.workspace_path(name);
-    backend.create(&source, &workspace)?;
-    write_metadata(&workspace, &Metadata::new(name, source))?;
-    Ok(workspace)
+    let state_dir = state_dir(home, name);
+    let workspace_path = backend.create(&state_dir, &source)?;
+    write_metadata(
+        &state_dir,
+        &Metadata::new(name, source, workspace_path.clone()),
+    )?;
+    Ok(workspace_path)
 }
 
 pub fn destroy_workspace<B: CowBackend>(home: &Path, backend: &B, name: &str) -> Result<()> {
     validate_name(name)?;
     let _lock = PandoLock::acquire(home)?;
     ensure_home(home)?;
-    backend.destroy(&backend.workspace_path(name))
+    backend.destroy(&state_dir(home, name))
 }
 
 pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
-    let dir = workspaces_dir(home);
-    if !dir.exists() {
+    if !home.exists() {
         return Ok(Vec::new());
     }
 
     let mut metadata = Vec::new();
-    for entry in fs::read_dir(dir)? {
+    for entry in fs::read_dir(home)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             if let Ok(item) = read_metadata(&entry.path()) {
@@ -57,23 +62,27 @@ pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
 #[cfg(test)]
 mod tests {
     use super::{create_workspace, destroy_workspace, list_workspaces};
-    use crate::{backend::MockBackend, home::workspaces_dir};
+    use crate::{backend::FsCowBackend, home::state_dir, metadata::metadata_path};
     use std::fs;
 
     #[test]
-    fn backend_agnostic_lifecycle() {
+    fn backend_agnostic_lifecycle_uses_home_name_state_dir() {
         let source = tempfile::tempdir().unwrap();
         fs::write(source.path().join("README.md"), "demo").unwrap();
 
         let home = tempfile::tempdir().unwrap();
-        let backend = MockBackend::new(workspaces_dir(home.path()));
+        let backend = FsCowBackend;
 
         let workspace = create_workspace(home.path(), &backend, "demo", source.path()).unwrap();
+        let state_dir = state_dir(home.path(), "demo");
+
+        assert_eq!(workspace, state_dir.join("workspace"));
         assert!(workspace.join("README.md").exists());
+        assert!(metadata_path(&state_dir).exists());
         assert_eq!(list_workspaces(home.path()).unwrap()[0].name, "demo");
 
         destroy_workspace(home.path(), &backend, "demo").unwrap();
-        assert!(!workspace.exists());
+        assert!(!state_dir.exists());
         assert!(list_workspaces(home.path()).unwrap().is_empty());
     }
 }
