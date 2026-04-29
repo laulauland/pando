@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod cli;
 pub mod home;
 pub mod lifecycle;
 pub mod metadata;
