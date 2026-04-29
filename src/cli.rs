@@ -5,8 +5,9 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand};
-use std::env;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
+use std::{env, io};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -23,6 +24,7 @@ pub struct Cli {
 enum Command {
     /// Create a Pando workspace from the current directory.
     Create {
+        /// Pando workspace name.
         name: String,
         /// Select the jj base revision for the new workspace. Ignored outside jj repositories.
         #[arg(long, value_name = "REVSET")]
@@ -30,12 +32,19 @@ enum Command {
     },
     /// List Pando workspaces.
     List,
-    /// Destroy a Pando workspace and its state.
-    Destroy {
+    /// Remove a Pando workspace and its state.
+    #[command(visible_alias = "rm", alias = "destroy")]
+    Remove {
+        /// Pando workspace name.
         name: String,
         /// Keep the jj workspace while removing Pando state.
         #[arg(long)]
         keep_jj_workspace: bool,
+    },
+    /// Print a shell completion script to stdout.
+    Completions {
+        /// Shell to generate completions for.
+        shell: Shell,
     },
 }
 
@@ -61,17 +70,17 @@ fn format_age(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
 }
 
 fn run_from(cli: Cli) -> Result<()> {
-    let home = pando_home()?;
-    let backend = PlatformCowBackend::default();
-
     match cli.command {
         Command::Create { name, from } => {
+            let home = pando_home()?;
+            let backend = PlatformCowBackend::default();
             let source = env::current_dir()?;
             let workspace_path =
                 create_workspace(&home, &backend, &name, &source, from.as_deref())?;
             println!("{}", workspace_path.display());
         }
         Command::List => {
+            let home = pando_home()?;
             println!("NAME\tAGE\tBASE\tJJ");
             for metadata in list_workspaces(&home)? {
                 let age = format_age(metadata.created_at, Utc::now());
@@ -89,11 +98,17 @@ fn run_from(cli: Cli) -> Result<()> {
                 println!("{}\t{}\t{}\t{}", metadata.name, age, base, jj);
             }
         }
-        Command::Destroy {
+        Command::Remove {
             name,
             keep_jj_workspace,
         } => {
+            let home = pando_home()?;
+            let backend = PlatformCowBackend::default();
             destroy_workspace(&home, &backend, &name, keep_jj_workspace)?;
+        }
+        Command::Completions { shell } => {
+            let mut command = Cli::command();
+            generate(shell, &mut command, "pando", &mut io::stdout());
         }
     }
 
@@ -105,6 +120,7 @@ mod tests {
     use super::{format_age, short_commit, Cli, Command};
     use chrono::{Duration, Utc};
     use clap::{CommandFactory, Parser};
+    use clap_complete::{generate, Shell};
 
     #[test]
     fn create_accepts_name_and_optional_from_revset() {
@@ -141,11 +157,11 @@ mod tests {
     }
 
     #[test]
-    fn destroy_accepts_keep_jj_workspace_flag() {
-        let cli = Cli::try_parse_from(["pando", "destroy", "demo", "--keep-jj-workspace"]).unwrap();
+    fn remove_accepts_keep_jj_workspace_flag() {
+        let cli = Cli::try_parse_from(["pando", "remove", "demo", "--keep-jj-workspace"]).unwrap();
 
         match cli.command {
-            Command::Destroy {
+            Command::Remove {
                 name,
                 keep_jj_workspace,
             } => {
@@ -157,6 +173,40 @@ mod tests {
     }
 
     #[test]
+    fn rm_alias_parses_as_remove() {
+        let cli = Cli::try_parse_from(["pando", "rm", "demo"]).unwrap();
+
+        match cli.command {
+            Command::Remove {
+                name,
+                keep_jj_workspace,
+            } => {
+                assert_eq!(name, "demo");
+                assert!(!keep_jj_workspace);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completions_accepts_shell_and_generates_bash_script() {
+        let cli = Cli::try_parse_from(["pando", "completions", "bash"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Completions { shell: Shell::Bash }
+        ));
+
+        let mut command = Cli::command();
+        let mut output = Vec::new();
+        generate(Shell::Bash, &mut command, "pando", &mut output);
+        let script = String::from_utf8(output).unwrap();
+
+        assert!(script.contains("_pando"));
+        assert!(script.contains("remove"));
+        assert!(script.contains("completions"));
+    }
+
+    #[test]
     fn help_avoids_version_and_implementation_details() {
         let mut command = Cli::command();
         let help = command.render_help().to_string();
@@ -164,5 +214,7 @@ mod tests {
         assert!(!help.contains("--version"));
         assert!(!help.contains("implementation"));
         assert!(!help.contains("native"));
+        assert!(help.contains("remove"));
+        assert!(!help.contains("destroy"));
     }
 }

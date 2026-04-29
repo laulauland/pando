@@ -7,7 +7,7 @@ use pando::{
 use std::{fs, path::Path, process::Command};
 
 #[test]
-fn cli_create_list_destroy_lifecycle_is_end_to_end() {
+fn cli_create_list_remove_lifecycle_is_end_to_end() {
     let source = tempfile::tempdir().unwrap();
     fs::create_dir(source.path().join("nested")).unwrap();
     fs::write(source.path().join("README.md"), "canonical").unwrap();
@@ -48,7 +48,7 @@ fn cli_create_list_destroy_lifecycle_is_end_to_end() {
     destroy_workspace(home.path(), &backend, "demo", false).unwrap();
     assert!(
         !demo_state_dir.exists(),
-        "destroy should remove the state dir"
+        "remove should delete the state dir"
     );
     assert!(list_workspaces(home.path()).unwrap().is_empty());
 }

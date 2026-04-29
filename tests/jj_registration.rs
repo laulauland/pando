@@ -74,8 +74,8 @@ fn cli_create_registers_native_jj_workspace_and_clean_diff() {
 }
 
 #[test]
-fn destroy_forgets_native_jj_workspace_by_default() {
-    if skip_if_jj_unavailable("jj destroy integration test") {
+fn remove_forgets_native_jj_workspace_by_default() {
+    if skip_if_jj_unavailable("jj remove integration test") {
         return;
     }
 
@@ -93,8 +93,8 @@ fn destroy_forgets_native_jj_workspace_by_default() {
 }
 
 #[test]
-fn destroy_keep_jj_workspace_preserves_native_jj_workspace() {
-    if skip_if_jj_unavailable("jj destroy keep integration test") {
+fn remove_keep_jj_workspace_preserves_native_jj_workspace() {
+    if skip_if_jj_unavailable("jj remove keep integration test") {
         return;
     }
 

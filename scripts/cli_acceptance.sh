@@ -45,10 +45,10 @@ list_output="$($PANDO list)"
 grep -q $'NAME\tAGE\tBASE\tJJ' <<< "$list_output"
 grep -q $'alpha\t.*\t-\t-' <<< "$list_output"
 grep -q $'beta\t.*\t-\t-' <<< "$list_output"
-"$PANDO" destroy alpha --keep-jj-workspace
+"$PANDO" remove alpha --keep-jj-workspace
 assert_missing "$PANDO_HOME/alpha"
 assert_exists "$PANDO_HOME/beta"
-"$PANDO" destroy beta
+"$PANDO" rm beta
 assert_missing "$PANDO_HOME/beta"
 
 echo "CLI acceptance passed."
