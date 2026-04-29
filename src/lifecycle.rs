@@ -76,18 +76,25 @@ pub fn destroy_workspace<B: CowBackend>(
 
     let state_dir = state_dir(home, name);
     if !keep_jj_workspace {
-        if let Ok(metadata) = read_metadata(&state_dir) {
-            if let Some(jj) = metadata.jj {
-                let workspace_name = jj
-                    .workspace_name
-                    .unwrap_or_else(|| pando_workspace_name(&metadata.name));
-                forget_pando_workspace(&metadata.canonical_root, &workspace_name)
-                    .with_context(|| format!("could not forget jj workspace '{workspace_name}'"))?;
-            }
-        }
+        forget_registered_jj_workspace(&state_dir)?;
     }
 
     backend.destroy(&state_dir)
+}
+
+fn forget_registered_jj_workspace(state_dir: &Path) -> Result<()> {
+    let Ok(metadata) = read_metadata(state_dir) else {
+        return Ok(());
+    };
+    let Some(jj) = metadata.jj else {
+        return Ok(());
+    };
+
+    let workspace_name = jj
+        .workspace_name
+        .unwrap_or_else(|| pando_workspace_name(&metadata.name));
+    forget_pando_workspace(&metadata.canonical_root, &workspace_name)
+        .with_context(|| format!("could not forget jj workspace '{workspace_name}'"))
 }
 
 pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
@@ -111,7 +118,11 @@ pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
 #[cfg(test)]
 mod tests {
     use super::{create_workspace, destroy_workspace, list_workspaces};
-    use crate::{backend::SimpleCowBackend, home::state_dir, metadata::metadata_path};
+    use crate::{
+        backend::SimpleCowBackend,
+        home::state_dir,
+        metadata::{metadata_path, write_metadata, JjMetadata, Metadata},
+    };
     use std::fs;
 
     #[test]
@@ -149,5 +160,26 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!state_dir.exists());
+    }
+
+    #[test]
+    fn destroy_keeps_state_dir_when_jj_forget_fails() {
+        let home = tempfile::tempdir().unwrap();
+        let state_dir = state_dir(home.path(), "demo");
+        let workspace_path = state_dir.join("workspace");
+        let mut metadata = Metadata::new("demo", home.path().join("missing-root"), workspace_path);
+        metadata.jj = Some(JjMetadata {
+            workspace_name: Some("pando-demo".to_owned()),
+            base_commit: None,
+        });
+        write_metadata(&state_dir, &metadata).unwrap();
+
+        let result = destroy_workspace(home.path(), &SimpleCowBackend, "demo", false);
+
+        assert!(result.is_err());
+        assert!(
+            state_dir.exists(),
+            "failed jj forget must not remove pando state"
+        );
     }
 }

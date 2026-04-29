@@ -176,12 +176,14 @@ pub fn forget_pando_workspace(canonical_root: &Path, workspace_name: &str) -> Re
     let workspace_name = WorkspaceNameBuf::from(workspace_name.to_owned());
 
     let mut tx = repo.start_transaction();
-    tx.repo_mut()
-        .remove_wc_commit(&workspace_name)
-        .block_on()?;
+    tx.repo_mut().remove_wc_commit(&workspace_name).block_on()?;
+    tx.repo_mut().rebase_descendants().block_on()?;
     tx.commit(format!("pando: destroy {}", workspace_name.as_symbol()))
         .block_on()?;
 
+    // Known limitation: jj-lib keeps workspace names in SimpleWorkspaceStore,
+    // which is not part of the repo transaction above. If this forget step
+    // fails, callers keep Pando state so the destroy can be retried.
     let workspace_store = SimpleWorkspaceStore::load(canonical_workspace.repo_path())?;
     workspace_store.forget(&[&workspace_name])?;
     Ok(())
