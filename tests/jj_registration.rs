@@ -33,10 +33,17 @@ fn cli_create_registers_native_jj_workspace_and_clean_diff() {
     init_jj_repo_with_base_and_empty_wc(source.path());
     let canonical_parent = jj_commit_id(source.path(), "@-");
     let home = tempfile::tempdir().unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    write_jj_user_config(
+        config_home.path(),
+        "Pando Config User",
+        "pando-config@example.invalid",
+    );
 
     let create = Command::new(env!("CARGO_BIN_EXE_pando"))
         .args(["create", "foo"])
         .env("PANDO_HOME", home.path())
+        .env("XDG_CONFIG_HOME", config_home.path())
         .current_dir(source.path())
         .output()
         .unwrap();
@@ -54,6 +61,11 @@ fn cli_create_registers_native_jj_workspace_and_clean_diff() {
         jj_commit_id(&workspace, "@-"),
         canonical_parent,
         "pando workspace @ should be based on canonical @- by default"
+    );
+    assert_eq!(
+        jj_template(&workspace, "@", "author.email()"),
+        "pando-config@example.invalid",
+        "pando-created workspace commit should use jj user config"
     );
     assert_clean_diff(&workspace);
 
@@ -241,16 +253,27 @@ fn jj_success(repo: &Path, args: &[&str]) {
 }
 
 fn jj_commit_id(repo: &Path, revset: &str) -> String {
-    jj_stdout(
-        repo,
-        &["log", "--no-graph", "-r", revset, "-T", "commit_id"],
-    )
+    jj_template(repo, revset, "commit_id")
+}
+
+fn jj_template(repo: &Path, revset: &str, template: &str) -> String {
+    jj_stdout(repo, &["log", "--no-graph", "-r", revset, "-T", template])
 }
 
 fn jj_stdout(repo: &Path, args: &[&str]) -> String {
     let output = jj_command(args).current_dir(repo).output().unwrap();
     assert_success(&format!("jj {}", args.join(" ")), &output);
     String::from_utf8(output.stdout).unwrap()
+}
+
+fn write_jj_user_config(config_home: &Path, name: &str, email: &str) {
+    let jj_config_dir = config_home.join("jj");
+    fs::create_dir_all(&jj_config_dir).unwrap();
+    fs::write(
+        jj_config_dir.join("config.toml"),
+        format!("user.name = {name:?}\nuser.email = {email:?}\n"),
+    )
+    .unwrap();
 }
 
 fn jj_command(args: &[&str]) -> Command {

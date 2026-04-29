@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use jj_lib::{
-    config::StackedConfig,
+    config::{ConfigSource, StackedConfig},
     fileset::FilesetAliasesMap,
     object_id::ObjectId,
     ref_name::{WorkspaceName, WorkspaceNameBuf},
@@ -16,7 +16,8 @@ use jj_lib::{
 };
 use pollster::FutureExt as _;
 use std::{
-    fs,
+    collections::BTreeSet,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -60,6 +61,34 @@ pub fn pando_workspace_name(name: &str) -> String {
     format!("pando-{name}")
 }
 
+fn load_user_settings() -> Result<UserSettings> {
+    let mut config = StackedConfig::with_defaults();
+    for path in jj_user_config_paths() {
+        if path.is_file() {
+            config.load_file(ConfigSource::User, path)?;
+        }
+    }
+    Ok(UserSettings::from_config(config)?)
+}
+
+fn jj_user_config_paths() -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+
+    if let Some(xdg_config_home) = env::var_os("XDG_CONFIG_HOME") {
+        paths.insert(PathBuf::from(xdg_config_home).join("jj/config.toml"));
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        paths.insert(home.join(".config/jj/config.toml"));
+    }
+
+    if let Some(config_dir) = dirs::config_dir() {
+        paths.insert(config_dir.join("jj/config.toml"));
+    }
+
+    paths.into_iter().collect()
+}
+
 /// Register `workspace_root` as a native jj workspace in `canonical_root`'s repo.
 ///
 /// This uses jj-lib's public `Workspace::init_workspace_with_existing_repo()`
@@ -94,7 +123,7 @@ pub fn register_pando_workspace(
         })?;
     }
 
-    let settings = UserSettings::from_config(StackedConfig::with_defaults())?;
+    let settings = load_user_settings()?;
     let store_factories = StoreFactories::default();
     let wc_factories = default_working_copy_factories();
     let canonical_workspace = Workspace::load(
@@ -170,7 +199,7 @@ pub fn register_pando_workspace(
 
 pub fn forget_pando_workspace(canonical_root: &Path, workspace_name: &str) -> Result<()> {
     let canonical_root = canonical_jj_root(canonical_root)?;
-    let settings = UserSettings::from_config(StackedConfig::with_defaults())?;
+    let settings = load_user_settings()?;
     let store_factories = StoreFactories::default();
     let wc_factories = default_working_copy_factories();
     let canonical_workspace = Workspace::load(
