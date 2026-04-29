@@ -125,7 +125,8 @@ mod tests {
         home::state_dir,
         metadata::{metadata_path, write_metadata, JjMetadata, Metadata},
     };
-    use std::fs;
+    use proptest::prelude::*;
+    use std::{collections::BTreeSet, fs};
 
     #[test]
     fn backend_agnostic_lifecycle_uses_home_name_state_dir() {
@@ -184,5 +185,75 @@ mod tests {
             state_dir.exists(),
             "failed jj forget must not remove pando state"
         );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Operation {
+        Create(usize),
+        Destroy(usize),
+        List,
+    }
+
+    fn operation() -> impl Strategy<Value = Operation> {
+        prop_oneof![
+            (0usize..3).prop_map(Operation::Create),
+            (0usize..3).prop_map(Operation::Destroy),
+            Just(Operation::List),
+        ]
+    }
+
+    fn assert_list_matches(home: &std::path::Path, existing: &BTreeSet<&'static str>) {
+        let listed: BTreeSet<String> = list_workspaces(home)
+            .unwrap()
+            .into_iter()
+            .map(|metadata| metadata.name)
+            .collect();
+        let expected: BTreeSet<String> = existing.iter().map(|name| (*name).to_owned()).collect();
+        assert_eq!(listed, expected);
+    }
+
+    proptest! {
+        #[test]
+        fn simple_backend_lifecycle_operation_sequences_preserve_list_invariant(
+            operations in prop::collection::vec(operation(), 0..32)
+        ) {
+            const NAMES: [&str; 3] = ["alpha", "beta", "gamma"];
+
+            let source = tempfile::tempdir().unwrap();
+            fs::create_dir(source.path().join("nested")).unwrap();
+            fs::write(source.path().join("README.md"), "demo").unwrap();
+            fs::write(source.path().join("nested/file.txt"), "nested").unwrap();
+
+            let home = tempfile::tempdir().unwrap();
+            let backend = SimpleCowBackend;
+            let mut existing = BTreeSet::new();
+
+            for operation in operations {
+                match operation {
+                    Operation::Create(index) => {
+                        let name = NAMES[index];
+                        let result = create_workspace(home.path(), &backend, name, source.path(), None);
+                        if existing.contains(name) {
+                            prop_assert!(result.is_err(), "duplicate create for {name:?} should fail");
+                        } else {
+                            let workspace = result.unwrap();
+                            prop_assert_eq!(&workspace, &state_dir(home.path(), name).join("workspace"));
+                            prop_assert!(workspace.join("README.md").exists());
+                            prop_assert!(workspace.join("nested/file.txt").exists());
+                            existing.insert(name);
+                        }
+                    }
+                    Operation::Destroy(index) => {
+                        let name = NAMES[index];
+                        let result = destroy_workspace(home.path(), &backend, name, false);
+                        prop_assert!(result.is_ok(), "destroy is idempotent for missing non-jj workspaces");
+                        existing.remove(name);
+                    }
+                    Operation::List => {}
+                }
+
+                assert_list_matches(home.path(), &existing);
+            }
+        }
     }
 }
