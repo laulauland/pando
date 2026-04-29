@@ -5,8 +5,11 @@ use std::{
 };
 
 const WORKSPACE_DIR: &str = "workspace";
+#[cfg(any(test, target_os = "linux"))]
 const OVERLAY_UPPER_DIR: &str = "upper";
+#[cfg(any(test, target_os = "linux"))]
 const OVERLAY_WORK_DIR: &str = "work";
+#[cfg(any(test, target_os = "linux"))]
 const OVERLAY_MERGED_DIR: &str = "merged";
 
 pub trait CowBackend {
@@ -37,9 +40,6 @@ impl CowBackend for SimpleCowBackend {
     }
 }
 
-/// Backwards-compatible name for the simple copy backend.
-pub type FsCowBackend = SimpleCowBackend;
-
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Default)]
 pub struct OverlayFsBackend;
@@ -61,7 +61,10 @@ impl CowBackend for OverlayFsBackend {
         fs::create_dir_all(&paths.work)
             .with_context(|| format!("could not create workdir: {}", paths.work.display()))?;
         fs::create_dir_all(&paths.merged).with_context(|| {
-            format!("could not create merged mountpoint: {}", paths.merged.display())
+            format!(
+                "could not create merged mountpoint: {}",
+                paths.merged.display()
+            )
         })?;
 
         mount_overlay(&source, &paths.upper, &paths.work, &paths.merged)?;
@@ -95,10 +98,8 @@ impl CowBackend for ApfsCloneBackend {
         Ok(workspace_path)
     }
 
-    fn destroy(&self, _state_dir: &Path) -> Result<()> {
-        // APFS clones are plain files once created; lifecycle cleanup is intentionally
-        // left to higher-level policy for this backend per the V1 spec.
-        Ok(())
+    fn destroy(&self, state_dir: &Path) -> Result<()> {
+        remove_state_dir_if_exists(state_dir)
     }
 
     fn workspace_path(&self, state_dir: &Path) -> PathBuf {
@@ -113,20 +114,21 @@ pub type PlatformCowBackend = ApfsCloneBackend;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub type PlatformCowBackend = SimpleCowBackend;
 
-pub fn simple_workspace_path(state_dir: &Path) -> PathBuf {
+fn simple_workspace_path(state_dir: &Path) -> PathBuf {
     state_dir.join(WORKSPACE_DIR)
 }
 
-pub fn overlay_merged_path(state_dir: &Path) -> PathBuf {
+#[cfg(any(test, target_os = "linux"))]
+fn overlay_merged_path(state_dir: &Path) -> PathBuf {
     state_dir.join(OVERLAY_MERGED_DIR)
 }
 
 #[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OverlayPaths {
-    pub upper: PathBuf,
-    pub work: PathBuf,
-    pub merged: PathBuf,
+struct OverlayPaths {
+    upper: PathBuf,
+    work: PathBuf,
+    merged: PathBuf,
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -155,7 +157,7 @@ fn remove_state_dir_if_exists(state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn copy_recursively(source: &Path, destination: &Path) -> Result<()> {
+fn copy_recursively(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::metadata(source)
         .with_context(|| format!("could not read source metadata: {}", source.display()))?;
     if !metadata.is_dir() {
@@ -191,7 +193,7 @@ pub fn copy_recursively(source: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn clone_recursively(source: &Path, destination: &Path) -> Result<()> {
+fn clone_recursively(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)
         .with_context(|| format!("could not read source metadata: {}", source.display()))?;
 
@@ -230,7 +232,7 @@ fn clone_file(source: &Path, destination: &Path) -> Result<()> {
     let destination_c = CString::new(destination.as_os_str().as_bytes())
         .with_context(|| format!("path contains NUL byte: {}", destination.display()))?;
 
-    let rc = unsafe { clonefile(source_c.as_ptr(), destination_c.as_ptr(), 0) };
+    let rc = unsafe { libc::clonefile(source_c.as_ptr(), destination_c.as_ptr(), 0) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error()).with_context(|| {
             format!(
@@ -241,15 +243,6 @@ fn clone_file(source: &Path, destination: &Path) -> Result<()> {
         });
     }
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn clonefile(
-        src: *const std::os::raw::c_char,
-        dst: *const std::os::raw::c_char,
-        flags: u32,
-    ) -> std::os::raw::c_int;
 }
 
 #[cfg(target_os = "linux")]
@@ -296,7 +289,7 @@ fn unmount_overlay(merged: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn overlay_mount_options(lower: &Path, upper: &Path, work: &Path) -> String {
+fn overlay_mount_options(lower: &Path, upper: &Path, work: &Path) -> String {
     format!(
         "lowerdir={},upperdir={},workdir={}",
         lower.display(),
@@ -400,6 +393,9 @@ mod tests {
         let backend = super::ApfsCloneBackend;
 
         let workspace = backend.create(&state_dir, source.path()).unwrap();
-        assert_eq!(fs::read_to_string(workspace.join("file.txt")).unwrap(), "hello");
+        assert_eq!(
+            fs::read_to_string(workspace.join("file.txt")).unwrap(),
+            "hello"
+        );
     }
 }

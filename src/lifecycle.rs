@@ -62,7 +62,7 @@ pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
 #[cfg(test)]
 mod tests {
     use super::{create_workspace, destroy_workspace, list_workspaces};
-    use crate::{backend::FsCowBackend, home::state_dir, metadata::metadata_path};
+    use crate::{backend::SimpleCowBackend, home::state_dir, metadata::metadata_path};
     use std::fs;
 
     #[test]
@@ -71,7 +71,7 @@ mod tests {
         fs::write(source.path().join("README.md"), "demo").unwrap();
 
         let home = tempfile::tempdir().unwrap();
-        let backend = FsCowBackend;
+        let backend = SimpleCowBackend;
 
         let workspace = create_workspace(home.path(), &backend, "demo", source.path()).unwrap();
         let state_dir = state_dir(home.path(), "demo");

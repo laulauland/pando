@@ -442,6 +442,7 @@ dependencies = [
  "clap",
  "dirs",
  "fs2",
+ "libc",
  "serde",
  "tempfile",
  "toml",
