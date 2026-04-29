@@ -1,7 +1,7 @@
 use crate::{
     backend::CowBackend,
     home::{ensure_home, state_dir, PandoLock},
-    jj::{has_jj_repo, register_pando_workspace},
+    jj::{forget_pando_workspace, has_jj_repo, pando_workspace_name, register_pando_workspace},
     metadata::{read_metadata, write_metadata, JjMetadata, Metadata},
     naming::validate_name,
 };
@@ -59,16 +59,35 @@ fn register_jj_if_needed(
 
     let registration = register_pando_workspace(source, workspace_path, name)?;
     Ok(Some(JjMetadata {
-        workspace_id: Some(registration.workspace_name),
-        operation_id: Some(registration.operation_id),
+        workspace_name: Some(registration.workspace_name),
+        base_commit: Some(registration.base_commit),
     }))
 }
 
-pub fn destroy_workspace<B: CowBackend>(home: &Path, backend: &B, name: &str) -> Result<()> {
+pub fn destroy_workspace<B: CowBackend>(
+    home: &Path,
+    backend: &B,
+    name: &str,
+    keep_jj_workspace: bool,
+) -> Result<()> {
     validate_name(name)?;
     let _lock = PandoLock::acquire(home)?;
     ensure_home(home)?;
-    backend.destroy(&state_dir(home, name))
+
+    let state_dir = state_dir(home, name);
+    if !keep_jj_workspace {
+        if let Ok(metadata) = read_metadata(&state_dir) {
+            if let Some(jj) = metadata.jj {
+                let workspace_name = jj
+                    .workspace_name
+                    .unwrap_or_else(|| pando_workspace_name(&metadata.name));
+                forget_pando_workspace(&metadata.canonical_root, &workspace_name)
+                    .with_context(|| format!("could not forget jj workspace '{workspace_name}'"))?;
+            }
+        }
+    }
+
+    backend.destroy(&state_dir)
 }
 
 pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
@@ -111,7 +130,7 @@ mod tests {
         assert!(metadata_path(&state_dir).exists());
         assert_eq!(list_workspaces(home.path()).unwrap()[0].name, "demo");
 
-        destroy_workspace(home.path(), &backend, "demo").unwrap();
+        destroy_workspace(home.path(), &backend, "demo", false).unwrap();
         assert!(!state_dir.exists());
         assert!(list_workspaces(home.path()).unwrap().is_empty());
     }

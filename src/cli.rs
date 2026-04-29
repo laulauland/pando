@@ -28,7 +28,7 @@ enum Command {
     /// Destroy a workspace and its lifecycle state.
     Destroy {
         name: String,
-        /// Accepted for the future V2 jj backend; currently a V1 no-op.
+        /// Destroy Pando state without forgetting the native jj workspace.
         #[arg(long)]
         keep_jj_workspace: bool,
     },
@@ -54,9 +54,9 @@ fn run_from(cli: Cli) -> Result<()> {
         }
         Command::Destroy {
             name,
-            keep_jj_workspace: _,
+            keep_jj_workspace,
         } => {
-            destroy_workspace(&home, &backend, &name)?;
+            destroy_workspace(&home, &backend, &name, keep_jj_workspace)?;
         }
     }
 
@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn destroy_accepts_keep_jj_workspace_as_noop_flag() {
+    fn destroy_accepts_keep_jj_workspace_flag() {
         let cli = Cli::try_parse_from(["pando", "destroy", "demo", "--keep-jj-workspace"]).unwrap();
 
         match cli.command {

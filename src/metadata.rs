@@ -20,10 +20,14 @@ pub struct Metadata {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JjMetadata {
+    #[serde(
+        default,
+        alias = "workspace_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workspace_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<String>,
+    pub base_commit: Option<String>,
 }
 
 impl Metadata {

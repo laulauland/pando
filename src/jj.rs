@@ -6,6 +6,7 @@ use jj_lib::{
     repo::{Repo as _, StoreFactories},
     settings::UserSettings,
     workspace::{default_working_copy_factories, default_working_copy_factory, Workspace},
+    workspace_store::{SimpleWorkspaceStore, WorkspaceStore as _},
 };
 use pollster::FutureExt as _;
 use std::{
@@ -46,7 +47,7 @@ pub fn canonical_jj_root(canonical_root: &Path) -> Result<JjCanonicalRoot> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JjRegistration {
     pub workspace_name: String,
-    pub operation_id: String,
+    pub base_commit: String,
 }
 
 pub fn pando_workspace_name(name: &str) -> String {
@@ -147,8 +148,43 @@ pub fn register_pando_workspace(
 
     Ok(JjRegistration {
         workspace_name: workspace_name.as_str().to_owned(),
-        operation_id: repo.op_id().hex(),
+        base_commit: base_commit.id().hex(),
     })
+}
+
+pub fn forget_pando_workspace(canonical_root: &Path, workspace_name: &str) -> Result<()> {
+    let canonical_root = canonical_jj_root(canonical_root)?;
+    let settings = UserSettings::from_config(StackedConfig::with_defaults())?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let canonical_workspace = Workspace::load(
+        &settings,
+        canonical_root.path(),
+        &store_factories,
+        &wc_factories,
+    )
+    .with_context(|| {
+        format!(
+            "could not load canonical jj workspace: {}",
+            canonical_root.path().display()
+        )
+    })?;
+    let repo = canonical_workspace
+        .repo_loader()
+        .load_at_head()
+        .block_on()?;
+    let workspace_name = WorkspaceNameBuf::from(workspace_name.to_owned());
+
+    let mut tx = repo.start_transaction();
+    tx.repo_mut()
+        .remove_wc_commit(&workspace_name)
+        .block_on()?;
+    tx.commit(format!("pando: destroy {}", workspace_name.as_symbol()))
+        .block_on()?;
+
+    let workspace_store = SimpleWorkspaceStore::load(canonical_workspace.repo_path())?;
+    workspace_store.forget(&[&workspace_name])?;
+    Ok(())
 }
 
 fn default_base_commit(

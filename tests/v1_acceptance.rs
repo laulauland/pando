@@ -44,7 +44,7 @@ fn v1_create_list_destroy_lifecycle_is_end_to_end() {
         source.path().canonicalize().unwrap()
     );
 
-    destroy_workspace(home.path(), &backend, "demo").unwrap();
+    destroy_workspace(home.path(), &backend, "demo", false).unwrap();
     assert!(
         !demo_state_dir.exists(),
         "destroy should remove the state dir"
@@ -96,7 +96,7 @@ fn v1_two_named_workspaces_do_not_interfere() {
         .collect();
     assert_eq!(names, vec!["alpha", "beta"]);
 
-    destroy_workspace(home.path(), &backend, "alpha").unwrap();
+    destroy_workspace(home.path(), &backend, "alpha", false).unwrap();
     assert!(!state_dir(home.path(), "alpha").exists());
     assert!(state_dir(home.path(), "beta").exists());
     assert_eq!(
