@@ -2,8 +2,9 @@ use pando::{
     backend::SimpleCowBackend,
     home::state_dir,
     lifecycle::{create_workspace, destroy_workspace, list_workspaces},
+    metadata::read_metadata,
 };
-use std::fs;
+use std::{fs, path::Path, process::Command};
 
 #[test]
 fn v1_create_list_destroy_lifecycle_is_end_to_end() {
@@ -15,7 +16,7 @@ fn v1_create_list_destroy_lifecycle_is_end_to_end() {
     let home = tempfile::tempdir().unwrap();
     let backend = SimpleCowBackend;
 
-    let workspace = create_workspace(home.path(), &backend, "demo", source.path()).unwrap();
+    let workspace = create_workspace(home.path(), &backend, "demo", source.path(), None).unwrap();
     let demo_state_dir = state_dir(home.path(), "demo");
 
     assert_eq!(workspace, demo_state_dir.join("workspace"));
@@ -53,6 +54,39 @@ fn v1_create_list_destroy_lifecycle_is_end_to_end() {
 }
 
 #[test]
+fn cli_create_ignores_from_revset_outside_jj_and_uses_current_dir() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("README.md"), "canonical").unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    let create = Command::new(env!("CARGO_BIN_EXE_pando"))
+        .args(["create", "plain", "--from", "not-a-real-revset"])
+        .env("PANDO_HOME", home.path())
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        create.status.success(),
+        "pando create failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create.stdout),
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let workspace = Path::new(std::str::from_utf8(&create.stdout).unwrap().trim()).to_path_buf();
+    assert_eq!(
+        fs::read_to_string(workspace.join("README.md")).unwrap(),
+        "canonical"
+    );
+
+    let metadata = read_metadata(&state_dir(home.path(), "plain")).unwrap();
+    assert_eq!(
+        metadata.canonical_root,
+        source.path().canonicalize().unwrap()
+    );
+    assert!(metadata.jj.is_none());
+}
+
+#[test]
 fn v1_two_named_workspaces_do_not_interfere() {
     let source = tempfile::tempdir().unwrap();
     fs::write(source.path().join("shared.txt"), "canonical").unwrap();
@@ -60,8 +94,8 @@ fn v1_two_named_workspaces_do_not_interfere() {
     let home = tempfile::tempdir().unwrap();
     let backend = SimpleCowBackend;
 
-    let alpha = create_workspace(home.path(), &backend, "alpha", source.path()).unwrap();
-    let beta = create_workspace(home.path(), &backend, "beta", source.path()).unwrap();
+    let alpha = create_workspace(home.path(), &backend, "alpha", source.path(), None).unwrap();
+    let beta = create_workspace(home.path(), &backend, "beta", source.path(), None).unwrap();
 
     assert_ne!(alpha, beta);
     assert_eq!(

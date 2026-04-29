@@ -1,9 +1,15 @@
 use anyhow::{bail, Context, Result};
 use jj_lib::{
     config::StackedConfig,
+    fileset::FilesetAliasesMap,
     object_id::ObjectId,
     ref_name::{WorkspaceName, WorkspaceNameBuf},
     repo::{Repo as _, StoreFactories},
+    repo_path::RepoPathUiConverter,
+    revset::{
+        RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
+        RevsetWorkspaceContext, SymbolResolver,
+    },
     settings::UserSettings,
     workspace::{default_working_copy_factories, default_working_copy_factory, Workspace},
     workspace_store::{SimpleWorkspaceStore, WorkspaceStore as _},
@@ -66,6 +72,7 @@ pub fn register_pando_workspace(
     canonical_root: &Path,
     workspace_root: &Path,
     name: &str,
+    from_revset: Option<&str>,
 ) -> Result<JjRegistration> {
     let canonical_root = canonical_jj_root(canonical_root)?;
     let workspace_root = workspace_root.canonicalize().with_context(|| {
@@ -125,7 +132,16 @@ pub fn register_pando_workspace(
         )
     })?;
 
-    let base_commit = default_base_commit(&canonical_repo, canonical_workspace.workspace_name())?;
+    let base_commit = match from_revset {
+        Some(revset) => resolve_single_revset_commit(
+            &canonical_repo,
+            canonical_root.path(),
+            canonical_workspace.workspace_name(),
+            &settings,
+            revset,
+        )?,
+        None => default_base_commit(&canonical_repo, canonical_workspace.workspace_name())?,
+    };
     let mut tx = repo_after_init.start_transaction();
     let repo_mut = tx.repo_mut();
     let wc_commit = repo_mut
@@ -187,6 +203,64 @@ pub fn forget_pando_workspace(canonical_root: &Path, workspace_name: &str) -> Re
     let workspace_store = SimpleWorkspaceStore::load(canonical_workspace.repo_path())?;
     workspace_store.forget(&[&workspace_name])?;
     Ok(())
+}
+
+fn resolve_single_revset_commit(
+    repo: &std::sync::Arc<jj_lib::repo::ReadonlyRepo>,
+    canonical_root: &Path,
+    canonical_workspace_name: &WorkspaceName,
+    settings: &UserSettings,
+    revset: &str,
+) -> Result<jj_lib::commit::Commit> {
+    let path_converter = RepoPathUiConverter::Fs {
+        cwd: canonical_root.to_path_buf(),
+        base: canonical_root.to_path_buf(),
+    };
+    let workspace_context = RevsetWorkspaceContext {
+        path_converter: &path_converter,
+        workspace_name: canonical_workspace_name,
+    };
+    let extensions = RevsetExtensions::default();
+    let aliases_map = RevsetAliasesMap::new();
+    let fileset_aliases_map = FilesetAliasesMap::new();
+    let context = RevsetParseContext {
+        aliases_map: &aliases_map,
+        local_variables: Default::default(),
+        user_email: settings.user_email(),
+        date_pattern_context: chrono::Utc::now().fixed_offset().into(),
+        default_ignored_remote: Some("git".as_ref()),
+        fileset_aliases_map: &fileset_aliases_map,
+        use_glob_by_default: true,
+        extensions: &extensions,
+        workspace: Some(workspace_context),
+    };
+    let expression = jj_lib::revset::parse(&mut RevsetDiagnostics::new(), revset, &context)
+        .with_context(|| format!("could not parse jj revset '{revset}'"))?;
+    let symbol_resolver = SymbolResolver::new(repo.as_ref(), extensions.symbol_resolvers());
+    let resolved = expression
+        .resolve_user_expression(repo.as_ref(), &symbol_resolver)
+        .with_context(|| format!("could not resolve jj revset '{revset}'"))?;
+    let evaluated = resolved
+        .evaluate(repo.as_ref())
+        .with_context(|| format!("could not evaluate jj revset '{revset}'"))?;
+    let mut ids = evaluated.iter();
+    let Some(id) = ids
+        .next()
+        .transpose()
+        .with_context(|| format!("could not evaluate jj revset '{revset}'"))?
+    else {
+        bail!("jj revset '{revset}' resolved to no commits");
+    };
+    if ids
+        .next()
+        .transpose()
+        .with_context(|| format!("could not evaluate jj revset '{revset}'"))?
+        .is_some()
+    {
+        bail!("jj revset '{revset}' resolved to more than one commit");
+    }
+
+    Ok(repo.store().get_commit(&id)?)
 }
 
 fn default_base_commit(

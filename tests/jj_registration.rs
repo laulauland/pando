@@ -71,7 +71,7 @@ fn destroy_forgets_native_jj_workspace_by_default() {
     init_jj_repo(source.path());
     let home = tempfile::tempdir().unwrap();
 
-    create_workspace(home.path(), &SimpleCowBackend, "foo", source.path()).unwrap();
+    create_workspace(home.path(), &SimpleCowBackend, "foo", source.path(), None).unwrap();
     assert_workspace_list_contains(source.path(), "pando-foo", true);
 
     destroy_workspace(home.path(), &SimpleCowBackend, "foo", false).unwrap();
@@ -90,7 +90,7 @@ fn destroy_keep_jj_workspace_preserves_native_jj_workspace() {
     init_jj_repo(source.path());
     let home = tempfile::tempdir().unwrap();
 
-    create_workspace(home.path(), &SimpleCowBackend, "foo", source.path()).unwrap();
+    create_workspace(home.path(), &SimpleCowBackend, "foo", source.path(), None).unwrap();
     destroy_workspace(home.path(), &SimpleCowBackend, "foo", true).unwrap();
 
     assert!(!state_dir(home.path(), "foo").exists());
@@ -109,7 +109,8 @@ fn simple_cow_copies_uncommitted_files_but_base_remains_parent() {
     let canonical_parent = jj_commit_id(source.path(), "@-");
     let home = tempfile::tempdir().unwrap();
 
-    let workspace = create_workspace(home.path(), &SimpleCowBackend, "foo", source.path()).unwrap();
+    let workspace =
+        create_workspace(home.path(), &SimpleCowBackend, "foo", source.path(), None).unwrap();
 
     assert_eq!(
         jj_commit_id(&workspace, "@-"),
@@ -123,10 +124,36 @@ fn simple_cow_copies_uncommitted_files_but_base_remains_parent() {
 }
 
 #[test]
-#[ignore = "TODO(PANDO-kgnuhuxw): pando create --from currently accepts a source directory path, not a jj revset"]
 fn create_from_revset_bases_workspace_at_requested_revision() {
-    // Once `pando create --from <REVSET>` is implemented for jj repos, assert
-    // that the created workspace's `@-` equals the requested revision.
+    if skip_if_jj_unavailable("jj create --from integration test") {
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    init_jj_repo_with_two_commits_and_empty_wc(source.path());
+    let requested_base = jj_commit_id(source.path(), "@--");
+    let default_base = jj_commit_id(source.path(), "@-");
+    assert_ne!(
+        requested_base, default_base,
+        "test setup should have two candidate bases"
+    );
+    let home = tempfile::tempdir().unwrap();
+
+    let create = Command::new(env!("CARGO_BIN_EXE_pando"))
+        .args(["create", "from-base", "--from", "@--"])
+        .env("PANDO_HOME", home.path())
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    assert_success("pando create --from @--", &create);
+    let workspace = Path::new(std::str::from_utf8(&create.stdout).unwrap().trim()).to_path_buf();
+
+    assert_workspace_list_contains(source.path(), "pando-from-base", true);
+    assert_eq!(
+        jj_commit_id(&workspace, "@-"),
+        requested_base,
+        "pando create --from should base pando @ on the requested revset"
+    );
 }
 
 fn init_jj_repo(path: &Path) {
@@ -142,6 +169,13 @@ fn init_jj_repo_with_base_and_empty_wc(path: &Path) {
     fs::write(path.join("file.txt"), "base\n").unwrap();
     jj_success(path, &["file", "track", "file.txt"]);
     jj_success(path, &["describe", "-m", "base"]);
+    jj_success(path, &["new"]);
+}
+
+fn init_jj_repo_with_two_commits_and_empty_wc(path: &Path) {
+    init_jj_repo_with_base_and_empty_wc(path);
+    fs::write(path.join("file.txt"), "second\n").unwrap();
+    jj_success(path, &["describe", "-m", "second"]);
     jj_success(path, &["new"]);
 }
 

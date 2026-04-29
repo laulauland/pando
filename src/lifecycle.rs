@@ -16,6 +16,7 @@ pub fn create_workspace<B: CowBackend>(
     backend: &B,
     name: &str,
     from: &Path,
+    from_revset: Option<&str>,
 ) -> Result<PathBuf> {
     validate_name(name)?;
     let _lock = PandoLock::acquire(home)?;
@@ -29,7 +30,7 @@ pub fn create_workspace<B: CowBackend>(
     let state_dir = state_dir(home, name);
     let workspace_path = backend.create(&state_dir, &source)?;
 
-    let jj = match register_jj_if_needed(&source, &workspace_path, name) {
+    let jj = match register_jj_if_needed(&source, &workspace_path, name, from_revset) {
         Ok(jj) => jj,
         Err(err) => {
             backend.destroy(&state_dir).with_context(|| {
@@ -52,12 +53,13 @@ fn register_jj_if_needed(
     source: &Path,
     workspace_path: &Path,
     name: &str,
+    from_revset: Option<&str>,
 ) -> Result<Option<JjMetadata>> {
     if !has_jj_repo(source) {
         return Ok(None);
     }
 
-    let registration = register_pando_workspace(source, workspace_path, name)?;
+    let registration = register_pando_workspace(source, workspace_path, name, from_revset)?;
     Ok(Some(JjMetadata {
         workspace_name: Some(registration.workspace_name),
         base_commit: Some(registration.base_commit),
@@ -133,7 +135,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let backend = SimpleCowBackend;
 
-        let workspace = create_workspace(home.path(), &backend, "demo", source.path()).unwrap();
+        let workspace =
+            create_workspace(home.path(), &backend, "demo", source.path(), None).unwrap();
         let state_dir = state_dir(home.path(), "demo");
 
         assert_eq!(workspace, state_dir.join("workspace"));
@@ -156,7 +159,7 @@ mod tests {
         let backend = SimpleCowBackend;
         let state_dir = state_dir(home.path(), "demo");
 
-        let result = create_workspace(home.path(), &backend, "demo", source.path());
+        let result = create_workspace(home.path(), &backend, "demo", source.path(), None);
 
         assert!(result.is_err());
         assert!(!state_dir.exists());

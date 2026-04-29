@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::env;
 
 #[derive(Debug, Parser)]
 #[command(name = "pando", version, about = "Lightweight workspace lifecycle CLI")]
@@ -16,12 +16,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a V1 workspace from a source directory.
+    /// Create a V1 workspace from the current directory.
     Create {
         name: String,
-        /// Source directory path to copy/clone. Defaults to the current directory.
-        #[arg(long, default_value = ".", value_name = "PATH")]
-        from: PathBuf,
+        /// jj revset to base the new workspace on. Ignored outside jj repositories.
+        #[arg(long, value_name = "REVSET")]
+        from: Option<String>,
     },
     /// List known workspaces.
     List,
@@ -44,7 +44,9 @@ fn run_from(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Create { name, from } => {
-            let workspace_path = create_workspace(&home, &backend, &name, &from)?;
+            let source = env::current_dir()?;
+            let workspace_path =
+                create_workspace(&home, &backend, &name, &source, from.as_deref())?;
             println!("{}", workspace_path.display());
         }
         Command::List => {
@@ -67,28 +69,26 @@ fn run_from(cli: Cli) -> Result<()> {
 mod tests {
     use super::{Cli, Command};
     use clap::Parser;
-    use std::path::PathBuf;
 
     #[test]
-    fn create_accepts_name_and_optional_from() {
-        let cli =
-            Cli::try_parse_from(["pando", "create", "demo", "--from", "/tmp/source"]).unwrap();
+    fn create_accepts_name_and_optional_from_revset() {
+        let cli = Cli::try_parse_from(["pando", "create", "demo", "--from", "@-"]).unwrap();
 
         match cli.command {
             Command::Create { name, from } => {
                 assert_eq!(name, "demo");
-                assert_eq!(from, PathBuf::from("/tmp/source"));
+                assert_eq!(from.as_deref(), Some("@-"));
             }
             other => panic!("unexpected command: {other:?}"),
         }
     }
 
     #[test]
-    fn create_defaults_from_to_current_directory() {
+    fn create_defaults_from_to_none() {
         let cli = Cli::try_parse_from(["pando", "create", "demo"]).unwrap();
 
         match cli.command {
-            Command::Create { from, .. } => assert_eq!(from, PathBuf::from(".")),
+            Command::Create { from, .. } => assert_eq!(from, None),
             other => panic!("unexpected command: {other:?}"),
         }
     }
