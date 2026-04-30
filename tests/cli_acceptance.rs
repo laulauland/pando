@@ -7,6 +7,46 @@ use pando::{
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn pando_and_pd_help_use_invoked_binary_names() {
+    let pando_help = Command::new(env!("CARGO_BIN_EXE_pando"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(pando_help.status.success());
+    let pando_stdout = String::from_utf8(pando_help.stdout).unwrap();
+    assert!(pando_stdout.contains("Usage: pando"));
+
+    let pd_help = Command::new(env!("CARGO_BIN_EXE_pd"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(pd_help.status.success());
+    let pd_stdout = String::from_utf8(pd_help.stdout).unwrap();
+    assert!(pd_stdout.contains("Usage: pd"));
+    assert!(!pd_stdout.contains("Usage: pando"));
+}
+
+#[test]
+fn pando_and_pd_completions_use_invoked_binary_names() {
+    let pando = Command::new(env!("CARGO_BIN_EXE_pando"))
+        .args(["completions", "bash"])
+        .output()
+        .unwrap();
+    assert!(pando.status.success());
+    let pando_stdout = String::from_utf8(pando.stdout).unwrap();
+    assert!(pando_stdout.contains("_pando"));
+
+    let pd = Command::new(env!("CARGO_BIN_EXE_pd"))
+        .args(["completions", "bash"])
+        .output()
+        .unwrap();
+    assert!(pd.status.success());
+    let pd_stdout = String::from_utf8(pd.stdout).unwrap();
+    assert!(pd_stdout.contains("_pd"));
+    assert!(!pd_stdout.contains("_pando"));
+}
+
+#[test]
 fn cli_create_list_remove_lifecycle_is_end_to_end() {
     let source = tempfile::tempdir().unwrap();
     fs::create_dir(source.path().join("nested")).unwrap();

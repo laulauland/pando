@@ -5,13 +5,12 @@ use crate::{
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::{generate, Shell};
-use std::{env, io};
+use std::{env, ffi::OsStr, io, path::Path};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "pando",
     disable_version_flag = true,
     about = "Create and manage isolated Pando workspaces"
 )]
@@ -49,7 +48,29 @@ enum Command {
 }
 
 pub fn run() -> Result<()> {
-    run_from(Cli::parse())
+    let binary_name = invoked_binary_name(env::args_os().next().as_deref());
+    let command_name = command_name_for_binary(&binary_name);
+    let matches = Cli::command().name(command_name).get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
+
+    run_from(cli, command_name)
+}
+
+fn invoked_binary_name(arg0: Option<&OsStr>) -> String {
+    arg0.map(Path::new)
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("pando")
+        .to_owned()
+}
+
+fn command_name_for_binary(binary_name: &str) -> &'static str {
+    if binary_name == "pd" {
+        "pd"
+    } else {
+        "pando"
+    }
 }
 
 fn short_commit(commit: &str) -> String {
@@ -69,7 +90,7 @@ fn format_age(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-fn run_from(cli: Cli) -> Result<()> {
+fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
     match cli.command {
         Command::Create { name, from } => {
             let home = pando_home()?;
@@ -107,8 +128,8 @@ fn run_from(cli: Cli) -> Result<()> {
             destroy_workspace(&home, &backend, &name, keep_jj_workspace)?;
         }
         Command::Completions { shell } => {
-            let mut command = Cli::command();
-            generate(shell, &mut command, "pando", &mut io::stdout());
+            let mut command = Cli::command().name(binary_name);
+            generate(shell, &mut command, binary_name, &mut io::stdout());
         }
     }
 
@@ -117,10 +138,13 @@ fn run_from(cli: Cli) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_age, short_commit, Cli, Command};
+    use super::{
+        command_name_for_binary, format_age, invoked_binary_name, short_commit, Cli, Command,
+    };
     use chrono::{Duration, Utc};
     use clap::{CommandFactory, Parser};
     use clap_complete::{generate, Shell};
+    use std::ffi::OsStr;
 
     #[test]
     fn create_accepts_name_and_optional_from_revset() {
@@ -196,7 +220,7 @@ mod tests {
             Command::Completions { shell: Shell::Bash }
         ));
 
-        let mut command = Cli::command();
+        let mut command = Cli::command().name("pando");
         let mut output = Vec::new();
         generate(Shell::Bash, &mut command, "pando", &mut output);
         let script = String::from_utf8(output).unwrap();
@@ -207,14 +231,34 @@ mod tests {
     }
 
     #[test]
-    fn help_avoids_version_and_implementation_details() {
-        let mut command = Cli::command();
+    fn help_uses_requested_binary_name_and_avoids_version_and_implementation_details() {
+        let mut command = Cli::command().name("pd");
         let help = command.render_help().to_string();
+
+        assert!(help.contains("Usage: pd"));
+        assert!(!help.contains("Usage: pando"));
 
         assert!(!help.contains("--version"));
         assert!(!help.contains("implementation"));
         assert!(!help.contains("native"));
         assert!(help.contains("remove"));
         assert!(!help.contains("destroy"));
+    }
+
+    #[test]
+    fn invoked_binary_name_uses_file_name_or_defaults_to_pando() {
+        assert_eq!(
+            invoked_binary_name(Some(OsStr::new("/usr/local/bin/pd"))),
+            "pd"
+        );
+        assert_eq!(invoked_binary_name(Some(OsStr::new("pando"))), "pando");
+        assert_eq!(invoked_binary_name(None), "pando");
+    }
+
+    #[test]
+    fn command_name_for_binary_supports_pd_alias() {
+        assert_eq!(command_name_for_binary("pd"), "pd");
+        assert_eq!(command_name_for_binary("pando"), "pando");
+        assert_eq!(command_name_for_binary("other"), "pando");
     }
 }
