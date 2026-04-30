@@ -4,6 +4,7 @@ use pando::{
     lifecycle::{create_workspace, destroy_workspace, list_workspaces},
     metadata::read_metadata,
 };
+use serde_json::Value;
 use std::{fs, path::Path, process::Command};
 
 #[test]
@@ -91,6 +92,65 @@ fn cli_create_list_remove_lifecycle_is_end_to_end() {
         "remove should delete the state dir"
     );
     assert!(list_workspaces(home.path()).unwrap().is_empty());
+}
+
+#[test]
+fn cli_info_json_prints_workspace_facts_and_pd_alias_matches() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("README.md"), "canonical").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let backend = SimpleCowBackend;
+
+    let workspace = create_workspace(home.path(), &backend, "plain", source.path(), None).unwrap();
+    let plain_state_dir = state_dir(home.path(), "plain");
+
+    for binary in [env!("CARGO_BIN_EXE_pando"), env!("CARGO_BIN_EXE_pd")] {
+        let output = Command::new(binary)
+            .args(["info", "plain", "--json"])
+            .env("PANDO_HOME", home.path())
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "{binary} info failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let info: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(info["name"], "plain");
+        assert_eq!(
+            info["state_dir"],
+            plain_state_dir.to_string_lossy().as_ref()
+        );
+        assert_eq!(info["workspace_path"], workspace.to_string_lossy().as_ref());
+        assert_eq!(
+            info["canonical_root"],
+            source
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        assert!(info["created_at"].is_string());
+        assert!(info.get("jj").is_none());
+    }
+}
+
+#[test]
+fn cli_info_missing_workspace_is_clear_nonzero_error() {
+    let home = tempfile::tempdir().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pando"))
+        .args(["info", "missing", "--json"])
+        .env("PANDO_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("workspace not found: missing"));
 }
 
 #[test]

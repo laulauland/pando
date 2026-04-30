@@ -1995,6 +1995,7 @@ dependencies = [
  "pollster",
  "proptest",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

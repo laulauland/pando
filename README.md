@@ -6,6 +6,7 @@
 
     pando create <name> [--from <revset>]
     pando list
+    pando info <name> --json
     pando remove <name> [--keep-jj-workspace]
     pando rm     <name> [--keep-jj-workspace]
     pando completions <shell>
@@ -23,6 +24,8 @@ Names cannot contain whitespace or path separators. `--from` takes a `jj` revset
     NAME       AGE  BASE          JJ
     feature-x  4m   8b1c0a3a04d2  pando-feature-x
     plain      1h   -             -
+
+`pando info <name> --json` prints stable workspace facts for scripts, including state and workspace paths, canonical root, creation time, and `jj` metadata when present.
 
 `pando remove` deletes the workspace's state directory and forgets the corresponding `jj` workspace from the canonical repo. `--keep-jj-workspace` skips the `jj` forget step but still deletes the state directory.
 

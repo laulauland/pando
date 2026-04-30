@@ -1,13 +1,21 @@
 use crate::{
-    backend::PlatformCowBackend,
-    home::pando_home,
+    backend::{CowBackend, PlatformCowBackend},
+    home::{pando_home, state_dir},
     lifecycle::{create_workspace, destroy_workspace, list_workspaces},
+    metadata::{read_metadata, JjMetadata},
+    naming::validate_name,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::{generate, Shell};
-use std::{env, ffi::OsStr, io, path::Path};
+use serde::Serialize;
+use std::{
+    env,
+    ffi::OsStr,
+    io,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -31,6 +39,14 @@ enum Command {
     },
     /// List Pando workspaces.
     List,
+    /// Print workspace facts.
+    Info {
+        /// Pando workspace name.
+        name: String,
+        /// Print workspace facts as JSON.
+        #[arg(long, required = true)]
+        json: bool,
+    },
     /// Remove a Pando workspace and its state.
     #[command(visible_alias = "rm", alias = "destroy")]
     Remove {
@@ -90,6 +106,52 @@ fn format_age(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct WorkspaceInfo {
+    name: String,
+    state_dir: PathBuf,
+    workspace_path: PathBuf,
+    canonical_root: PathBuf,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jj: Option<WorkspaceJjInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct WorkspaceJjInfo {
+    workspace_name: Option<String>,
+    base_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_path: Option<PathBuf>,
+}
+
+fn workspace_info<B: CowBackend>(home: &Path, backend: &B, name: &str) -> Result<WorkspaceInfo> {
+    validate_name(name)?;
+    let state_dir = state_dir(home, name);
+    let metadata =
+        read_metadata(&state_dir).with_context(|| format!("workspace not found: {name}"))?;
+
+    Ok(WorkspaceInfo {
+        name: metadata.name,
+        state_dir: state_dir.clone(),
+        workspace_path: backend.workspace_path(&state_dir),
+        canonical_root: metadata.canonical_root.clone(),
+        created_at: metadata.created_at,
+        jj: metadata
+            .jj
+            .map(|jj| workspace_jj_info(jj, &metadata.canonical_root)),
+    })
+}
+
+fn workspace_jj_info(jj: JjMetadata, canonical_root: &Path) -> WorkspaceJjInfo {
+    let repo_path = canonical_root.join(".jj/repo");
+    WorkspaceJjInfo {
+        workspace_name: jj.workspace_name,
+        base_commit: jj.base_commit,
+        repo_path: repo_path.is_dir().then_some(repo_path),
+    }
+}
+
 fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
     match cli.command {
         Command::Create { name, from } => {
@@ -119,6 +181,12 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                 println!("{}\t{}\t{}\t{}", metadata.name, age, base, jj);
             }
         }
+        Command::Info { name, json: _ } => {
+            let home = pando_home()?;
+            let backend = PlatformCowBackend::default();
+            let info = workspace_info(&home, &backend, &name)?;
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        }
         Command::Remove {
             name,
             keep_jj_workspace,
@@ -139,12 +207,19 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_name_for_binary, format_age, invoked_binary_name, short_commit, Cli, Command,
+        command_name_for_binary, format_age, invoked_binary_name, short_commit, workspace_info,
+        Cli, Command,
+    };
+    use crate::{
+        backend::SimpleCowBackend,
+        home::state_dir,
+        metadata::{write_metadata, JjMetadata, Metadata},
     };
     use chrono::{Duration, Utc};
     use clap::{CommandFactory, Parser};
     use clap_complete::{generate, Shell};
-    use std::ffi::OsStr;
+    use serde_json::Value;
+    use std::{ffi::OsStr, fs};
 
     #[test]
     fn create_accepts_name_and_optional_from_revset() {
@@ -167,6 +242,64 @@ mod tests {
             Command::Create { from, .. } => assert_eq!(from, None),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn info_requires_json_flag() {
+        let error = Cli::try_parse_from(["pando", "info", "demo"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn info_accepts_name_and_json_flag() {
+        let cli = Cli::try_parse_from(["pando", "info", "demo", "--json"]).unwrap();
+
+        match cli.command {
+            Command::Info { name, json } => {
+                assert_eq!(name, "demo");
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_info_json_shape_derives_workspace_path_from_backend() {
+        let home = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let canonical_root = source.path().canonicalize().unwrap();
+        fs::create_dir_all(canonical_root.join(".jj/repo")).unwrap();
+        let state_dir = state_dir(home.path(), "demo");
+        let mut metadata = Metadata::new("demo", canonical_root.clone(), state_dir.join("stale"));
+        metadata.jj = Some(JjMetadata {
+            workspace_name: Some("pando-demo".to_owned()),
+            base_commit: Some("1234567890abcdef".to_owned()),
+        });
+        write_metadata(&state_dir, &metadata).unwrap();
+
+        let info = workspace_info(home.path(), &SimpleCowBackend, "demo").unwrap();
+        let value: Value = serde_json::to_value(&info).unwrap();
+
+        assert_eq!(value["name"], "demo");
+        assert_eq!(value["state_dir"], state_dir.to_string_lossy().as_ref());
+        assert_eq!(
+            value["workspace_path"],
+            state_dir.join("workspace").to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            value["canonical_root"],
+            canonical_root.to_string_lossy().as_ref()
+        );
+        assert!(value["created_at"].is_string());
+        assert_eq!(value["jj"]["workspace_name"], "pando-demo");
+        assert_eq!(value["jj"]["base_commit"], "1234567890abcdef");
+        assert_eq!(
+            value["jj"]["repo_path"],
+            canonical_root.join(".jj/repo").to_string_lossy().as_ref()
+        );
     }
 
     #[test]
