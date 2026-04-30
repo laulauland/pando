@@ -1,6 +1,8 @@
 # pando
 
-`pando` creates isolated, copy-on-write workspaces from a source directory. Each workspace is a CoW clone of the source tree, registered as a native `jj` workspace when the source is a `jj` repository, so you can edit, build, and commit in parallel without disturbing the canonical checkout. It is named after the clonal aspen colony: many trunks, one root system.
+`pando` creates isolated, copy-on-write workspaces from a source directory. Each workspace is a CoW clone of the source tree, registered as a native `jj` workspace when the source is a `jj` repository, so you can edit, build, and commit in parallel without disturbing the canonical checkout. 
+
+> `pando` is named after the clonal aspen colony: many trunks, one root system.
 
 ## Usage
 
