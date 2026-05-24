@@ -67,7 +67,12 @@ impl CowBackend for OverlayFsBackend {
             )
         })?;
 
-        if let Err(err) = mount_overlay(&source, &paths.upper, &paths.work, &paths.merged) {
+        let mount_result = if is_root() {
+            mount_overlay(&source, &paths.upper, &paths.work, &paths.merged)
+        } else {
+            fuse_mount_overlay(&source, &paths.upper, &paths.work, &paths.merged)
+        };
+        if let Err(err) = mount_result {
             let _ = remove_state_dir_if_exists(state_dir);
             return Err(err);
         }
@@ -76,8 +81,12 @@ impl CowBackend for OverlayFsBackend {
 
     fn destroy(&self, state_dir: &Path) -> Result<()> {
         let merged = self.workspace_path(state_dir);
-        if merged.exists() && is_mountpoint(&merged) {
-            unmount_overlay(&merged)?;
+        if merged.exists() {
+            match detect_mount_type(&merged) {
+                Some(MountType::Kernel) => unmount_overlay(&merged)?,
+                Some(MountType::Fuse) => fuse_unmount(&merged)?,
+                None => {}
+            }
         }
         remove_state_dir_if_exists(state_dir)
     }
@@ -291,21 +300,159 @@ fn unmount_overlay(merged: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check whether `path` is a mount point by comparing its device number to its
-/// parent's. Different device numbers mean a filesystem boundary — i.e. a mount.
 #[cfg(target_os = "linux")]
-fn is_mountpoint(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(path_meta) = fs::metadata(path) else {
-        return false;
+fn is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MountType {
+    Kernel,
+    Fuse,
+}
+
+/// Read `/proc/mounts` to determine whether `merged` is a kernel overlay or
+/// fuse-overlayfs mount. Returns `None` when the path has no mount entry.
+#[cfg(target_os = "linux")]
+fn detect_mount_type(merged: &Path) -> Option<MountType> {
+    let canonical = merged.canonicalize().ok()?;
+    let canonical_str = canonical.to_str()?;
+    let mounts = fs::read_to_string("/proc/mounts").ok()?;
+    for line in mounts.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() >= 3 && fields[1] == canonical_str {
+            return match fields[2] {
+                "overlay" => Some(MountType::Kernel),
+                "fuse.fuse-overlayfs" => Some(MountType::Fuse),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn fuse_mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Result<()> {
+    let binary = resolve_fuse_overlayfs()?;
+    let options = overlay_mount_options(lower, upper, work);
+    let output = std::process::Command::new(&binary)
+        .arg("-o")
+        .arg(&options)
+        .arg(merged)
+        .output()
+        .with_context(|| format!("could not run {}", binary.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "fuse-overlayfs mount failed at {}: {}",
+            merged.display(),
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn fuse_unmount(merged: &Path) -> Result<()> {
+    let binary = resolve_fusermount();
+    let output = std::process::Command::new(&binary)
+        .arg("-u")
+        .arg(merged)
+        .output()
+        .with_context(|| format!("could not run {binary}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "could not unmount fuse overlay at {}: {}",
+            merged.display(),
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_fusermount() -> &'static str {
+    for candidate in ["fusermount3", "fusermount"] {
+        if std::process::Command::new(candidate)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            // Leak a &'static str — called at most twice per process.
+            return Box::leak(candidate.to_owned().into_boxed_str());
+        }
+    }
+    "fusermount3"
+}
+
+/// Find fuse-overlayfs: check PATH first, then the pando cache dir, and
+/// download a static binary as a last resort.
+#[cfg(target_os = "linux")]
+fn resolve_fuse_overlayfs() -> Result<PathBuf> {
+    if let Ok(output) = std::process::Command::new("fuse-overlayfs")
+        .arg("--version")
+        .output()
+    {
+        if output.status.success() {
+            return Ok(PathBuf::from("fuse-overlayfs"));
+        }
+    }
+
+    let cached = fuse_overlayfs_cache_path()?;
+    if cached.is_file() {
+        return Ok(cached);
+    }
+
+    download_fuse_overlayfs(&cached)?;
+    Ok(cached)
+}
+
+#[cfg(target_os = "linux")]
+fn fuse_overlayfs_cache_path() -> Result<PathBuf> {
+    let data_dir = dirs::data_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine data directory"))?;
+    Ok(data_dir.join("pando/bin/fuse-overlayfs"))
+}
+
+#[cfg(target_os = "linux")]
+fn download_fuse_overlayfs(target: &Path) -> Result<()> {
+    const VERSION: &str = "v1.16";
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => bail!("no prebuilt fuse-overlayfs binary for architecture: {other}"),
     };
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    let Ok(parent_meta) = fs::metadata(parent) else {
-        return false;
-    };
-    path_meta.dev() != parent_meta.dev()
+    let url = format!(
+        "https://github.com/containers/fuse-overlayfs/releases/download/{VERSION}/fuse-overlayfs-{arch}"
+    );
+
+    eprintln!("fuse-overlayfs not found; downloading static binary to {}...", target.display());
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let output = std::process::Command::new("curl")
+        .args(["-fsSL", "-o"])
+        .arg(target)
+        .arg(&url)
+        .output()
+        .context("could not run curl to download fuse-overlayfs")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "failed to download fuse-overlayfs from {url}: {}",
+            stderr.trim()
+        );
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(target, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("could not make {} executable", target.display()))?;
+
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
