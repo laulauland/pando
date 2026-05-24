@@ -1,5 +1,5 @@
 use crate::{
-    backend::{CowBackend, PlatformCowBackend},
+    backend::PlatformCowBackend,
     home::{pando_home, state_dir},
     lifecycle::{create_workspace, destroy_workspace, list_workspaces},
     metadata::{read_metadata, JjMetadata},
@@ -125,7 +125,7 @@ struct WorkspaceJjInfo {
     repo_path: Option<PathBuf>,
 }
 
-fn workspace_info<B: CowBackend>(home: &Path, backend: &B, name: &str) -> Result<WorkspaceInfo> {
+fn workspace_info(home: &Path, name: &str) -> Result<WorkspaceInfo> {
     validate_name(name)?;
     let state_dir = state_dir(home, name);
     let metadata =
@@ -133,8 +133,8 @@ fn workspace_info<B: CowBackend>(home: &Path, backend: &B, name: &str) -> Result
 
     Ok(WorkspaceInfo {
         name: metadata.name,
-        state_dir: state_dir.clone(),
-        workspace_path: backend.workspace_path(&state_dir),
+        state_dir,
+        workspace_path: metadata.workspace_path,
         canonical_root: metadata.canonical_root.clone(),
         created_at: metadata.created_at,
         jj: metadata
@@ -183,8 +183,7 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
         }
         Command::Info { name, json: _ } => {
             let home = pando_home()?;
-            let backend = PlatformCowBackend::default();
-            let info = workspace_info(&home, &backend, &name)?;
+            let info = workspace_info(&home, &name)?;
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
         Command::Remove {
@@ -211,7 +210,6 @@ mod tests {
         Cli, Command,
     };
     use crate::{
-        backend::SimpleCowBackend,
         home::state_dir,
         metadata::{write_metadata, JjMetadata, Metadata},
     };
@@ -267,27 +265,28 @@ mod tests {
     }
 
     #[test]
-    fn workspace_info_json_shape_derives_workspace_path_from_backend() {
+    fn workspace_info_json_uses_stored_metadata_workspace_path() {
         let home = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
         let canonical_root = source.path().canonicalize().unwrap();
         fs::create_dir_all(canonical_root.join(".jj/repo")).unwrap();
         let state_dir = state_dir(home.path(), "demo");
-        let mut metadata = Metadata::new("demo", canonical_root.clone(), state_dir.join("stale"));
+        let workspace_path = state_dir.join("workspace");
+        let mut metadata = Metadata::new("demo", canonical_root.clone(), workspace_path.clone());
         metadata.jj = Some(JjMetadata {
             workspace_name: Some("pando-demo".to_owned()),
             base_commit: Some("1234567890abcdef".to_owned()),
         });
         write_metadata(&state_dir, &metadata).unwrap();
 
-        let info = workspace_info(home.path(), &SimpleCowBackend, "demo").unwrap();
+        let info = workspace_info(home.path(), "demo").unwrap();
         let value: Value = serde_json::to_value(&info).unwrap();
 
         assert_eq!(value["name"], "demo");
         assert_eq!(value["state_dir"], state_dir.to_string_lossy().as_ref());
         assert_eq!(
             value["workspace_path"],
-            state_dir.join("workspace").to_string_lossy().as_ref()
+            workspace_path.to_string_lossy().as_ref()
         );
         assert_eq!(
             value["canonical_root"],

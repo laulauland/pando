@@ -67,13 +67,16 @@ impl CowBackend for OverlayFsBackend {
             )
         })?;
 
-        mount_overlay(&source, &paths.upper, &paths.work, &paths.merged)?;
+        if let Err(err) = mount_overlay(&source, &paths.upper, &paths.work, &paths.merged) {
+            let _ = remove_state_dir_if_exists(state_dir);
+            return Err(err);
+        }
         Ok(paths.merged)
     }
 
     fn destroy(&self, state_dir: &Path) -> Result<()> {
         let merged = self.workspace_path(state_dir);
-        if merged.exists() {
+        if merged.exists() && is_mountpoint(&merged) {
             unmount_overlay(&merged)?;
         }
         remove_state_dir_if_exists(state_dir)
@@ -286,6 +289,23 @@ fn unmount_overlay(merged: &Path) -> Result<()> {
             .with_context(|| format!("could not unmount overlay: {}", merged.display()));
     }
     Ok(())
+}
+
+/// Check whether `path` is a mount point by comparing its device number to its
+/// parent's. Different device numbers mean a filesystem boundary — i.e. a mount.
+#[cfg(target_os = "linux")]
+fn is_mountpoint(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(path_meta) = fs::metadata(path) else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(parent_meta) = fs::metadata(parent) else {
+        return false;
+    };
+    path_meta.dev() != parent_meta.dev()
 }
 
 #[cfg(target_os = "linux")]
