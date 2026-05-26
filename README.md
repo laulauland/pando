@@ -43,8 +43,22 @@ When the source contains a `.jj/` directory, pando uses `jj-lib` directly (no sh
 
 `remove` is the inverse: it forgets the `jj` workspace via a transaction on the canonical repo and then removes the state directory. If the `jj` forget step fails, the state directory is left in place so the operation can be retried.
 
+## Install
+
+With Homebrew:
+
+    brew install laulauland/tap/pando
+
+Or with the release installer:
+
+    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | bash
+
+Set `BIN_DIR` to choose the install directory, or `PANDO_VERSION` to install a specific release:
+
+    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.2.0 bash
+
 ## Build
 
     cargo build --release
 
-The binary lands at `target/release/pando`. Tests: `cargo test`. Integration tests under `tests/jj_registration.rs` are skipped when the `jj` binary is not on `PATH`.
+The binaries land at `target/release/pando` and `target/release/pd`. Tests: `cargo test`. Integration tests under `tests/jj_registration.rs` are skipped when the `jj` binary is not on `PATH`.

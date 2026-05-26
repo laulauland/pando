@@ -1,0 +1,113 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bottle_tag: arm64_sequoia
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bottle_tag: x86_64_linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Package bottle
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          mkdir -p "pando/${VERSION}/bin"
+          cp "target/${{ matrix.target }}/release/pando" "pando/${VERSION}/bin/"
+          cp "target/${{ matrix.target }}/release/pd" "pando/${VERSION}/bin/"
+          tar czf "pando-${VERSION}.${{ matrix.bottle_tag }}.bottle.tar.gz" "pando/${VERSION}/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bottle-${{ matrix.bottle_tag }}
+          path: "*.bottle.tar.gz"
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Generate changelog
+        uses: orhun/git-cliff-action@v4
+        id: changelog
+        with:
+          args: --latest --strip header
+        env:
+          OUTPUT: CHANGELOG.md
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
+          files: "*.bottle.tar.gz"
+
+  update-tap:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Update homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          SOURCE_SHA=$(curl -sL "https://github.com/laulauland/pando/archive/refs/tags/v${VERSION}.tar.gz" | shasum -a 256 | cut -d' ' -f1)
+          ARM64_SHA=$(shasum -a 256 "pando-${VERSION}.arm64_sequoia.bottle.tar.gz" | cut -d' ' -f1)
+          LINUX_SHA=$(shasum -a 256 "pando-${VERSION}.x86_64_linux.bottle.tar.gz" | cut -d' ' -f1)
+
+          cat > /tmp/pando.rb << RUBY
+          class Pando < Formula
+            desc "Isolated copy-on-write workspaces with native jj integration"
+            homepage "https://github.com/laulauland/pando"
+            url "https://github.com/laulauland/pando/archive/refs/tags/v${VERSION}.tar.gz"
+            sha256 "${SOURCE_SHA}"
+            license "MIT"
+
+            bottle do
+              root_url "https://github.com/laulauland/pando/releases/download/v${VERSION}"
+              sha256 arm64_sequoia: "${ARM64_SHA}"
+              sha256 x86_64_linux: "${LINUX_SHA}"
+            end
+
+            depends_on "rust" => :build
+
+            def install
+              system "cargo", "install", *std_cargo_args
+            end
+
+            test do
+              assert_match "pando", shell_output("#{bin}/pando --help")
+              assert_match "pando", shell_output("#{bin}/pd --help")
+            end
+          end
+          RUBY
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' /tmp/pando.rb
+
+          EXISTING_SHA=$(gh api repos/laulauland/homebrew-tap/contents/Formula/pando.rb --jq '.sha')
+          gh api repos/laulauland/homebrew-tap/contents/Formula/pando.rb \
+            --method PUT \
+            --field message="pando ${VERSION}" \
+            --field content="$(base64 -w0 /tmp/pando.rb)" \
+            --field sha="${EXISTING_SHA}"
