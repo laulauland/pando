@@ -383,24 +383,24 @@ mod tests {
     fn format_workspace_list_aligns_columns_for_mixed_name_lengths() {
         let table = format_workspace_list(&[
             ListRow {
-                name: "alchemy-research".to_owned(),
+                name: "long-workspace-name".to_owned(),
                 age: "1h".to_owned(),
                 base: "y".to_owned(),
-                jj: "pando-alchemy-research".to_owned(),
+                jj: "pando-long-workspace-name".to_owned(),
             },
             ListRow {
-                name: "effect-sentry".to_owned(),
+                name: "short-name".to_owned(),
                 age: "10m".to_owned(),
                 base: "krs".to_owned(),
-                jj: "pando-effect-sentry".to_owned(),
+                jj: "pando-short-name".to_owned(),
             },
         ]);
 
         assert_eq!(
             table,
-            "NAME              AGE  BASE  JJ\n\
-             alchemy-research   1h  y     pando-alchemy-research\n\
-             effect-sentry     10m  krs   pando-effect-sentry\n"
+            "NAME                 AGE  BASE  JJ\n\
+             long-workspace-name   1h  y     pando-long-workspace-name\n\
+             short-name           10m  krs   pando-short-name\n"
         );
     }
 
