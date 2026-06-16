@@ -42,9 +42,9 @@ grep -q 'alpha' "$alpha/README.md"
 grep -q 'beta' "$beta/README.md"
 
 list_output="$($PANDO list)"
-grep -q $'NAME\tAGE\tBASE\tJJ' <<< "$list_output"
-grep -q $'alpha\t.*\t-\t-' <<< "$list_output"
-grep -q $'beta\t.*\t-\t-' <<< "$list_output"
+grep -q 'NAME.*AGE.*BASE.*JJ' <<< "$list_output"
+grep -q 'alpha.*-.*-' <<< "$list_output"
+grep -q 'beta.*-.*-' <<< "$list_output"
 "$PANDO" remove alpha --keep-jj-workspace
 assert_missing "$PANDO_HOME/alpha"
 assert_exists "$PANDO_HOME/beta"

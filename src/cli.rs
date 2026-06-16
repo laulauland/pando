@@ -89,8 +89,65 @@ fn command_name_for_binary(binary_name: &str) -> &'static str {
     }
 }
 
-fn short_commit(commit: &str) -> String {
-    commit.chars().take(12).collect()
+fn base_revision_for_list(canonical_root: &Path, jj: &crate::metadata::JjMetadata) -> String {
+    if let Some(revision) = jj.base_revision.as_deref() {
+        return revision.to_owned();
+    }
+
+    if let Some(commit) = jj.base_commit.as_deref() {
+        return crate::jj::lookup_base_revision(canonical_root, commit)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "-".to_owned());
+    }
+
+    "-".to_owned()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ListRow {
+    name: String,
+    age: String,
+    base: String,
+    jj: String,
+}
+
+fn format_workspace_list(rows: &[ListRow]) -> String {
+    let name_width = rows
+        .iter()
+        .map(|row| row.name.len())
+        .max()
+        .unwrap_or(0)
+        .max("NAME".len());
+    let age_width = rows
+        .iter()
+        .map(|row| row.age.len())
+        .max()
+        .unwrap_or(0)
+        .max("AGE".len());
+    let base_width = rows
+        .iter()
+        .map(|row| row.base.len())
+        .max()
+        .unwrap_or(0)
+        .max("BASE".len());
+
+    let mut output = format!(
+        "{:<name_width$}  {:>age_width$}  {:<base_width$}  {}\n",
+        "NAME",
+        "AGE",
+        "BASE",
+        "JJ",
+    );
+
+    for row in rows {
+        output.push_str(&format!(
+            "{:<name_width$}  {:>age_width$}  {:<base_width$}  {}\n",
+            row.name, row.age, row.base, row.jj,
+        ));
+    }
+
+    output
 }
 
 fn format_age(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
@@ -121,6 +178,7 @@ struct WorkspaceInfo {
 struct WorkspaceJjInfo {
     workspace_name: Option<String>,
     base_commit: Option<String>,
+    base_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     repo_path: Option<PathBuf>,
 }
@@ -148,6 +206,7 @@ fn workspace_jj_info(jj: JjMetadata, canonical_root: &Path) -> WorkspaceJjInfo {
     WorkspaceJjInfo {
         workspace_name: jj.workspace_name,
         base_commit: jj.base_commit,
+        base_revision: jj.base_revision,
         repo_path: repo_path.is_dir().then_some(repo_path),
     }
 }
@@ -164,22 +223,30 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
         }
         Command::List => {
             let home = pando_home()?;
-            println!("NAME\tAGE\tBASE\tJJ");
-            for metadata in list_workspaces(&home)? {
-                let age = format_age(metadata.created_at, Utc::now());
-                let base = metadata
-                    .jj
-                    .as_ref()
-                    .and_then(|jj| jj.base_commit.as_deref())
-                    .map(short_commit)
-                    .unwrap_or_else(|| "-".to_owned());
-                let jj = metadata
-                    .jj
-                    .as_ref()
-                    .and_then(|jj| jj.workspace_name.as_deref())
-                    .unwrap_or("-");
-                println!("{}\t{}\t{}\t{}", metadata.name, age, base, jj);
-            }
+            let rows = list_workspaces(&home)?
+                .into_iter()
+                .map(|metadata| {
+                    let age = format_age(metadata.created_at, Utc::now());
+                    let base = metadata
+                        .jj
+                        .as_ref()
+                        .map(|jj| base_revision_for_list(&metadata.canonical_root, jj))
+                        .unwrap_or_else(|| "-".to_owned());
+                    let jj = metadata
+                        .jj
+                        .as_ref()
+                        .and_then(|jj| jj.workspace_name.as_deref())
+                        .unwrap_or("-")
+                        .to_owned();
+                    ListRow {
+                        name: metadata.name,
+                        age,
+                        base,
+                        jj,
+                    }
+                })
+                .collect::<Vec<_>>();
+            print!("{}", format_workspace_list(&rows));
         }
         Command::Info { name, json: _ } => {
             let home = pando_home()?;
@@ -206,8 +273,8 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_name_for_binary, format_age, invoked_binary_name, short_commit, workspace_info,
-        Cli, Command,
+        command_name_for_binary, format_age, format_workspace_list, invoked_binary_name,
+        workspace_info, Cli, Command, ListRow,
     };
     use crate::{
         home::state_dir,
@@ -276,6 +343,7 @@ mod tests {
         metadata.jj = Some(JjMetadata {
             workspace_name: Some("pando-demo".to_owned()),
             base_commit: Some("1234567890abcdef".to_owned()),
+            base_revision: Some("y".to_owned()),
         });
         write_metadata(&state_dir, &metadata).unwrap();
 
@@ -295,6 +363,7 @@ mod tests {
         assert!(value["created_at"].is_string());
         assert_eq!(value["jj"]["workspace_name"], "pando-demo");
         assert_eq!(value["jj"]["base_commit"], "1234567890abcdef");
+        assert_eq!(value["jj"]["base_revision"], "y");
         assert_eq!(
             value["jj"]["repo_path"],
             canonical_root.join(".jj/repo").to_string_lossy().as_ref()
@@ -303,13 +372,36 @@ mod tests {
 
     #[test]
     fn list_helpers_use_product_display_values() {
-        assert_eq!(short_commit("1234567890abcdef"), "1234567890ab");
-
         let now = Utc::now();
         assert_eq!(format_age(now - Duration::seconds(3), now), "3s");
         assert_eq!(format_age(now - Duration::minutes(2), now), "2m");
         assert_eq!(format_age(now - Duration::hours(4), now), "4h");
         assert_eq!(format_age(now - Duration::days(5), now), "5d");
+    }
+
+    #[test]
+    fn format_workspace_list_aligns_columns_for_mixed_name_lengths() {
+        let table = format_workspace_list(&[
+            ListRow {
+                name: "alchemy-research".to_owned(),
+                age: "1h".to_owned(),
+                base: "y".to_owned(),
+                jj: "pando-alchemy-research".to_owned(),
+            },
+            ListRow {
+                name: "effect-sentry".to_owned(),
+                age: "10m".to_owned(),
+                base: "krs".to_owned(),
+                jj: "pando-effect-sentry".to_owned(),
+            },
+        ]);
+
+        assert_eq!(
+            table,
+            "NAME              AGE  BASE  JJ\n\
+             alchemy-research   1h  y     pando-alchemy-research\n\
+             effect-sentry     10m  krs   pando-effect-sentry\n"
+        );
     }
 
     #[test]

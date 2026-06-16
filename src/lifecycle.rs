@@ -63,6 +63,7 @@ fn register_jj_if_needed(
     Ok(Some(JjMetadata {
         workspace_name: Some(registration.workspace_name),
         base_commit: Some(registration.base_commit),
+        base_revision: Some(registration.base_revision),
     }))
 }
 
@@ -175,6 +176,7 @@ mod tests {
         metadata.jj = Some(JjMetadata {
             workspace_name: Some("pando-demo".to_owned()),
             base_commit: None,
+            base_revision: None,
         });
         write_metadata(&state_dir, &metadata).unwrap();
 

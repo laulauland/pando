@@ -21,11 +21,11 @@ The same CLI is also installed as `pd` for shorter invocations (`pd create`, `pd
 
 Names cannot contain whitespace or path separators. `--from` takes a `jj` revset that must resolve to exactly one commit; it is silently ignored when the source is not a `jj` repository. With no `--from`, the new workspace is based on the canonical workspace's `@-`.
 
-`pando list` prints a tab-separated table — `NAME`, `AGE`, `BASE` (12-char base commit), and `JJ` (the registered workspace name, or `-` for non-jj sources):
+`pando list` prints an aligned table — `NAME`, `AGE`, `BASE` (jj change id revision), and `JJ` (the registered workspace name, or `-` for non-jj sources):
 
-    NAME       AGE  BASE          JJ
-    feature-x  4m   8b1c0a3a04d2  pando-feature-x
-    plain      1h   -             -
+    NAME       AGE  BASE  JJ
+    feature-x  4m   y     pando-feature-x
+    plain      1h   -     -
 
 `pando info <name> --json` prints stable workspace facts for scripts, including state and workspace paths, canonical root, creation time, and `jj` metadata when present.
 

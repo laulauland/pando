@@ -54,6 +54,11 @@ fn cli_create_registers_native_jj_workspace_and_clean_diff() {
     let jj_metadata = metadata.jj.expect("jj metadata should be written");
     assert_eq!(jj_metadata.workspace_name.as_deref(), Some("pando-foo"));
     assert!(jj_metadata.base_commit.is_some());
+    assert!(jj_metadata.base_revision.is_some());
+    assert_eq!(
+        jj_metadata.base_revision.as_deref(),
+        Some(jj_template(source.path(), "@-", "change_id.shortest()").as_str())
+    );
     assert!(workspace.join(".jj").is_dir());
 
     assert_workspace_list_contains(source.path(), "pando-foo", true);

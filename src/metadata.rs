@@ -28,6 +28,8 @@ pub struct JjMetadata {
     pub workspace_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<String>,
 }
 
 impl Metadata {
@@ -107,10 +109,12 @@ mod tests {
             (
                 prop::option::of("[a-zA-Z0-9_-]{1,16}"),
                 prop::option::of("[a-f0-9]{12,40}"),
+                prop::option::of("[0-9a-z]{1,12}"),
             )
-                .prop_map(|(workspace_name, base_commit)| JjMetadata {
+                .prop_map(|(workspace_name, base_commit, base_revision)| JjMetadata {
                     workspace_name,
                     base_commit,
+                    base_revision,
                 }),
         )
     }

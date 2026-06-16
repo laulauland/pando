@@ -19,7 +19,7 @@ The substantive win over plain `jj workspace add` is preserving the *current dir
 
 ```
 pando create <name> [--from <revset>]   # create workspace, prints abs path on stdout
-pando list                              # NAME / AGE / BASE / JJ (tab-separated)
+pando list                              # NAME / AGE / BASE / JJ (aligned columns)
 pando info <name> --json                # workspace facts as JSON
 pando remove <name> [--keep-jj-workspace]
 pando rm <name>                         # alias of remove
@@ -64,7 +64,7 @@ Pass `--keep-jj-workspace` only if the user explicitly wants pando state gone bu
 ## Inspecting state
 
 ```bash
-pando list                              # workspaces, ages, base commits
+pando list                              # workspaces, ages, base jj revisions
 pando info <name> --json                # name, state_dir, workspace_path, canonical_root, created_at, jj{}
 cat "$PANDO_HOME/<name>/meta.toml"      # raw metadata on disk
 ```

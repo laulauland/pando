@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
 use jj_lib::{
+    backend::CommitId,
     config::{ConfigSource, StackedConfig},
     fileset::FilesetAliasesMap,
-    object_id::ObjectId,
+    id_prefix::IdPrefixContext,
+    object_id::ObjectId as _,
     ref_name::{WorkspaceName, WorkspaceNameBuf},
     repo::{Repo as _, StoreFactories},
     repo_path::RepoPathUiConverter,
@@ -54,6 +56,7 @@ pub fn canonical_jj_root(canonical_root: &Path) -> Result<JjCanonicalRoot> {
 pub struct JjRegistration {
     pub workspace_name: String,
     pub base_commit: String,
+    pub base_revision: String,
 }
 
 pub fn pando_workspace_name(name: &str) -> String {
@@ -206,7 +209,69 @@ pub fn register_pando_workspace(
     Ok(JjRegistration {
         workspace_name: workspace_name.as_str().to_owned(),
         base_commit: base_commit.id().hex(),
+        base_revision: format_change_revision(canonical_repo.as_ref(), base_commit.change_id())?,
     })
+}
+
+/// Resolve the jj change id for a stored base commit hash.
+pub fn lookup_base_revision(canonical_root: &Path, base_commit_hex: &str) -> Result<Option<String>> {
+    if !has_jj_repo(canonical_root) {
+        return Ok(None);
+    }
+
+    let canonical_root = canonical_jj_root(canonical_root)?;
+    let commit_id = CommitId::try_from_hex(base_commit_hex)
+        .with_context(|| format!("invalid stored base commit id '{base_commit_hex}'"))?;
+    let settings = load_user_settings()?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let workspace = Workspace::load(
+        &settings,
+        canonical_root.path(),
+        &store_factories,
+        &wc_factories,
+    )
+    .with_context(|| {
+        format!(
+            "could not load canonical jj workspace: {}",
+            canonical_root.path().display()
+        )
+    })?;
+    let repo = workspace
+        .repo_loader()
+        .load_at_head()
+        .block_on()
+        .with_context(|| {
+            format!(
+                "could not load jj repo at {}",
+                canonical_root.path().display()
+            )
+        })?;
+
+    if !repo.index().has_id(&commit_id)? {
+        return Ok(None);
+    }
+
+    let commit = repo.store().get_commit(&commit_id)?;
+    Ok(Some(format_change_revision(
+        repo.as_ref(),
+        commit.change_id(),
+    )?))
+}
+
+fn format_change_revision(
+    repo: &dyn jj_lib::repo::Repo,
+    change_id: &jj_lib::backend::ChangeId,
+) -> Result<String> {
+    let prefix_context = IdPrefixContext::default();
+    let prefix_index = prefix_context
+        .populate(repo)
+        .context("could not load jj id prefix index")?;
+    let len = prefix_index
+        .shortest_change_prefix_len(repo, change_id)
+        .context("could not determine jj change id prefix length")?;
+    let id_sym = change_id.reverse_hex();
+    Ok(id_sym[..len].to_owned())
 }
 
 pub fn forget_pando_workspace(canonical_root: &Path, workspace_name: &str) -> Result<()> {
