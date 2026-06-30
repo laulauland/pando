@@ -7,6 +7,14 @@ edition = "2021"
 name = "pd"
 path = "src/bin/pd.rs"
 
+[[bench]]
+name = "create"
+harness = false
+
+[[bench]]
+name = "compare"
+harness = false
+
 [dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

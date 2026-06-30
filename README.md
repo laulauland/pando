@@ -62,3 +62,19 @@ Set `BIN_DIR` to choose the install directory, or `PANDO_VERSION` to install a s
     cargo build --release
 
 The binaries land at `target/release/pando` and `target/release/pd`. Tests: `cargo test`. Integration tests under `tests/jj_registration.rs` are skipped when the `jj` binary is not on `PATH`.
+
+## Benchmark
+
+Measure real workspace creation against a source directory:
+
+    cargo bench --bench create -- /path/to/workspace --samples 10 --output target/bench-results/current.json
+
+Compare multiple candidate Pando checkouts against the same workload:
+
+    cargo bench --bench compare -- /path/to/workspace \
+      --candidate /path/to/pando-baseline \
+      --candidate /path/to/pando-candidate \
+      --samples 10 \
+      --output target/bench-results/compare-run
+
+The create benchmark times only `create_workspace`; cleanup runs after each measured sample and the JSON result records median, minimum, maximum, and cleanup status.
