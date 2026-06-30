@@ -105,8 +105,10 @@ impl CowBackend for ApfsCloneBackend {
     fn create(&self, state_dir: &Path, source: &Path) -> Result<PathBuf> {
         ensure_new_state_dir(state_dir)?;
 
+        fs::create_dir_all(state_dir)
+            .with_context(|| format!("could not create state dir: {}", state_dir.display()))?;
         let workspace_path = self.workspace_path(state_dir);
-        clone_recursively(source, &workspace_path)?;
+        clone_path(source, &workspace_path)?;
         Ok(workspace_path)
     }
 
@@ -205,37 +207,7 @@ fn copy_recursively(source: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn clone_recursively(source: &Path, destination: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("could not read source metadata: {}", source.display()))?;
-
-    if metadata.is_dir() {
-        fs::create_dir_all(destination)
-            .with_context(|| format!("could not create directory: {}", destination.display()))?;
-        for entry in fs::read_dir(source)
-            .with_context(|| format!("could not read directory: {}", source.display()))?
-        {
-            let entry = entry?;
-            clone_recursively(&entry.path(), &destination.join(entry.file_name()))?;
-        }
-        return Ok(());
-    }
-
-    if metadata.file_type().is_symlink() {
-        copy_symlink(source, destination)?;
-        return Ok(());
-    }
-
-    if metadata.is_file() {
-        clone_file(source, destination)?;
-        return Ok(());
-    }
-
-    bail!("unsupported file type in source tree: {}", source.display());
-}
-
-#[cfg(target_os = "macos")]
-fn clone_file(source: &Path, destination: &Path) -> Result<()> {
+fn clone_path(source: &Path, destination: &Path) -> Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
