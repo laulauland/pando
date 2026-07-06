@@ -18,7 +18,8 @@ use jj_lib::{
 };
 use pollster::FutureExt as _;
 use std::{
-    env, fs,
+    collections::BTreeSet,
+    env, fs, io,
     path::{Path, PathBuf},
 };
 
@@ -169,6 +170,13 @@ pub fn register_pando_workspace(
         )?,
         None => default_base_commit(&canonical_repo, canonical_workspace.workspace_name())?,
     };
+    let copied_source_base_commit = match from_revset {
+        Some(_) => Some(default_base_commit(
+            &canonical_repo,
+            canonical_workspace.workspace_name(),
+        )?),
+        None => None,
+    };
 
     let (mut pando_workspace, repo_after_init) = Workspace::init_workspace_with_existing_repo(
         &workspace_root,
@@ -186,6 +194,15 @@ pub fn register_pando_workspace(
         )
     })?;
 
+    if let Some(copied_source_base_commit) = copied_source_base_commit.as_ref() {
+        // The COW backend cloned the source checkout before jj registration. jj's
+        // fresh working-copy state starts from an empty tree, so checkout will
+        // not overwrite files that already exist on disk. For an explicit
+        // --from, clear copied tracked files first so checkout materializes the
+        // requested tree while leaving ignored/untracked build state intact.
+        remove_copied_tracked_files(&workspace_root, [&base_commit, copied_source_base_commit])?;
+    }
+
     let mut tx = repo_after_init.start_transaction();
     let repo_mut = tx.repo_mut();
     let wc_commit = repo_mut
@@ -199,9 +216,10 @@ pub fn register_pando_workspace(
         ))
         .block_on()?;
 
-    // Make the working-copy state agree with the selected commit. The physical
-    // files are already supplied by the COW backend; checkout reconciles jj's
-    // recorded tree state with the working-copy commit.
+    // Make the working-copy state agree with the selected commit. Without an
+    // explicit --from, physical tracked files are already supplied by the COW
+    // backend; with --from, copied tracked files were cleared above so checkout
+    // writes the requested tree.
     pando_workspace
         .check_out(repo.op_id().clone(), None, &wc_commit)
         .block_on()?;
@@ -213,8 +231,51 @@ pub fn register_pando_workspace(
     })
 }
 
+fn remove_copied_tracked_files<'a>(
+    workspace_root: &Path,
+    commits: impl IntoIterator<Item = &'a jj_lib::commit::Commit>,
+) -> Result<()> {
+    let mut paths = BTreeSet::new();
+    for commit in commits {
+        for (path, value) in commit.tree().entries() {
+            value.with_context(|| {
+                format!(
+                    "could not read tracked path while preparing jj workspace {}",
+                    commit.id().hex()
+                )
+            })?;
+            paths.insert(path);
+        }
+    }
+
+    for path in paths {
+        let disk_path = path.to_fs_path(workspace_root)?;
+        match fs::remove_file(&disk_path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(_err)
+                if disk_path
+                    .symlink_metadata()
+                    .is_ok_and(|metadata| metadata.is_dir()) => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "could not remove copied tracked file before jj checkout: {}",
+                        disk_path.display()
+                    )
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolve the jj change id for a stored base commit hash.
-pub fn lookup_base_revision(canonical_root: &Path, base_commit_hex: &str) -> Result<Option<String>> {
+pub fn lookup_base_revision(
+    canonical_root: &Path,
+    base_commit_hex: &str,
+) -> Result<Option<String>> {
     if !has_jj_repo(canonical_root) {
         return Ok(None);
     }

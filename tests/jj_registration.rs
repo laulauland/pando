@@ -171,6 +171,13 @@ fn create_from_revset_bases_workspace_at_requested_revision() {
         requested_base,
         "pando create --from should base pando @ on the requested revset"
     );
+    assert_ne!(requested_base, default_base);
+    assert_eq!(
+        fs::read_to_string(workspace.join("file.txt")).unwrap(),
+        "base\n",
+        "pando create --from should materialize tracked files from the requested revset"
+    );
+    assert_clean_diff(&workspace);
 }
 
 #[test]
