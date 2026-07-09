@@ -95,7 +95,7 @@ fn cli_create_list_remove_lifecycle_is_end_to_end() {
 }
 
 #[test]
-fn cli_info_json_prints_workspace_facts_and_pd_alias_matches() {
+fn cli_info_prints_workspace_facts_and_pd_get_alias_matches() {
     let source = tempfile::tempdir().unwrap();
     fs::write(source.path().join("README.md"), "canonical").unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -104,39 +104,80 @@ fn cli_info_json_prints_workspace_facts_and_pd_alias_matches() {
     let workspace = create_workspace(home.path(), &backend, "plain", source.path(), None).unwrap();
     let plain_state_dir = state_dir(home.path(), "plain");
 
-    for binary in [env!("CARGO_BIN_EXE_pando"), env!("CARGO_BIN_EXE_pd")] {
+    for (binary, args) in [
+        (env!("CARGO_BIN_EXE_pando"), ["info", "plain"]),
+        (env!("CARGO_BIN_EXE_pd"), ["get", "plain"]),
+    ] {
         let output = Command::new(binary)
-            .args(["info", "plain", "--json"])
+            .args(args)
             .env("PANDO_HOME", home.path())
             .output()
             .unwrap();
 
         assert!(
             output.status.success(),
-            "{binary} info failed\nstdout:\n{}\nstderr:\n{}",
+            "{binary} {} failed\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let info: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(info["name"], "plain");
-        assert_eq!(
-            info["state_dir"],
-            plain_state_dir.to_string_lossy().as_ref()
-        );
-        assert_eq!(info["workspace_path"], workspace.to_string_lossy().as_ref());
-        assert_eq!(
-            info["canonical_root"],
-            source
-                .path()
-                .canonicalize()
-                .unwrap()
-                .to_string_lossy()
-                .as_ref()
-        );
-        assert!(info["created_at"].is_string());
-        assert!(info.get("jj").is_none());
+        let table = String::from_utf8(output.stdout).unwrap();
+        assert!(table.contains("FIELD"));
+        assert!(table.contains("VALUE"));
+        assert!(table.contains("plain"));
+        assert!(table.contains(workspace.to_string_lossy().as_ref()));
+        assert!(!table.trim_start().starts_with('{'));
     }
+
+    let json_output = Command::new(env!("CARGO_BIN_EXE_pd"))
+        .args(["get", "plain", "--json"])
+        .env("PANDO_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        json_output.status.success(),
+        "pd get --json failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&json_output.stdout),
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+
+    let info: Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(info["name"], "plain");
+    assert_eq!(
+        info["state_dir"],
+        plain_state_dir.to_string_lossy().as_ref()
+    );
+    assert_eq!(info["workspace_path"], workspace.to_string_lossy().as_ref());
+    assert_eq!(
+        info["canonical_root"],
+        source
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert!(info["created_at"].is_string());
+    assert!(info.get("jj").is_none());
+
+    let cd = Command::new(env!("CARGO_BIN_EXE_pd"))
+        .args(["cd", "plain", "--print"])
+        .env("PANDO_HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        cd.status.success(),
+        "pd cd --print failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&cd.stdout),
+        String::from_utf8_lossy(&cd.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(cd.stdout).unwrap(),
+        format!("{}\n", workspace.display())
+    );
 }
 
 #[test]
@@ -144,7 +185,7 @@ fn cli_info_missing_workspace_is_clear_nonzero_error() {
     let home = tempfile::tempdir().unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_pando"))
-        .args(["info", "missing", "--json"])
+        .args(["info", "missing"])
         .env("PANDO_HOME", home.path())
         .output()
         .unwrap();

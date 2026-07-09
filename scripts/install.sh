@@ -4,6 +4,7 @@ set -euo pipefail
 repo="laulauland/pando"
 bin_dir="${BIN_DIR:-/usr/local/bin}"
 version="${PANDO_VERSION:-latest}"
+install_completions="${INSTALL_COMPLETIONS:-1}"
 
 usage() {
   cat <<'EOF'
@@ -13,8 +14,12 @@ Usage:
   curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | bash
 
 Environment:
-  PANDO_VERSION  Version to install, e.g. 0.2.0 or v0.2.0 (default: latest)
-  BIN_DIR        Install directory (default: /usr/local/bin)
+  PANDO_VERSION         Version to install, e.g. 0.2.0 or v0.2.0 (default: latest)
+  BIN_DIR               Install directory (default: /usr/local/bin)
+  INSTALL_COMPLETIONS   Install shell completions: 1 or 0 (default: 1)
+  BASH_COMPLETION_DIR   Bash completion directory
+  ZSH_COMPLETION_DIR    Zsh completion directory
+  FISH_COMPLETION_DIR   Fish completion directory
 EOF
 }
 
@@ -93,5 +98,36 @@ for bin in pando pd; do
   dest="${bin_dir}/${bin}"
   "${install_cmd[@]}" "${src}" "${dest}"
 done
+
+install_completion_file() {
+  local shell="$1"
+  local bin="$2"
+  local dir="$3"
+  local file="$4"
+  local binary_path="${bin_dir}/${bin}"
+
+  mkdir -p "${dir}"
+  "${binary_path}" completions "${shell}" >"${tmp}/${file}"
+  install -m 0644 "${tmp}/${file}" "${dir}/${file}"
+}
+
+if [ "${install_completions}" != "0" ]; then
+  xdg_data_home="${XDG_DATA_HOME:-${HOME}/.local/share}"
+  xdg_config_home="${XDG_CONFIG_HOME:-${HOME}/.config}"
+  bash_completion_dir="${BASH_COMPLETION_DIR:-${xdg_data_home}/bash-completion/completions}"
+  zsh_completion_dir="${ZSH_COMPLETION_DIR:-${ZDOTDIR:-${HOME}}/.zsh/completions}"
+  fish_completion_dir="${FISH_COMPLETION_DIR:-${xdg_config_home}/fish/completions}"
+
+  for bin in pando pd; do
+    install_completion_file bash "${bin}" "${bash_completion_dir}" "${bin}"
+    install_completion_file zsh "${bin}" "${zsh_completion_dir}" "_${bin}"
+    install_completion_file fish "${bin}" "${fish_completion_dir}" "${bin}.fish"
+  done
+
+  echo "Installed shell completions to:" >&2
+  echo "  bash: ${bash_completion_dir}" >&2
+  echo "  zsh:  ${zsh_completion_dir}" >&2
+  echo "  fish: ${fish_completion_dir}" >&2
+fi
 
 echo "Installed pando and pd to ${bin_dir}" >&2

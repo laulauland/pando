@@ -8,7 +8,9 @@
 
     pando create <name> [--from <revset>]
     pando list
-    pando info <name> --json
+    pando info <name> [--json]
+    pando get  <name> [--json]
+    pando cd   <name> [--print]
     pando remove <name> [--keep-jj-workspace]
     pando rm     <name> [--keep-jj-workspace]
     pando completions <shell>
@@ -27,7 +29,9 @@ Names cannot contain whitespace or path separators. `--from` takes a `jj` revset
     feature-x  4m   y     pando-feature-x
     plain      1h   -     -
 
-`pando info <name> --json` prints stable workspace facts for scripts, including state and workspace paths, canonical root, creation time, and `jj` metadata when present.
+`pando info <name>` prints workspace facts as an aligned table. Pass `--json` for stable JSON output for scripts, including state and workspace paths, canonical root, creation time, and `jj` metadata when present. `pando get <name>` is an alias for `info`.
+
+`pando cd <name>` opens your shell in that workspace. Pass `--print` to print the workspace path instead.
 
 `pando remove` deletes the workspace's state directory and forgets the corresponding `jj` workspace from the canonical repo. `--keep-jj-workspace` skips the `jj` forget step but still deletes the state directory.
 
@@ -56,6 +60,8 @@ Or with the release installer:
 Set `BIN_DIR` to choose the install directory, or `PANDO_VERSION` to install a specific release:
 
     curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.2.0 bash
+
+The installer also writes bash, zsh, and fish completions for both `pando` and `pd` into user completion directories by default. Set `INSTALL_COMPLETIONS=0` to skip them, or override `BASH_COMPLETION_DIR`, `ZSH_COMPLETION_DIR`, or `FISH_COMPLETION_DIR`.
 
 ## Build
 

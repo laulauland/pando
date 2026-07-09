@@ -383,8 +383,8 @@ fn resolve_fuse_overlayfs() -> Result<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn fuse_overlayfs_cache_path() -> Result<PathBuf> {
-    let data_dir = dirs::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("could not determine data directory"))?;
+    let data_dir =
+        dirs::data_dir().ok_or_else(|| anyhow::anyhow!("could not determine data directory"))?;
     Ok(data_dir.join("pando/bin/fuse-overlayfs"))
 }
 
@@ -400,7 +400,10 @@ fn download_fuse_overlayfs(target: &Path) -> Result<()> {
         "https://github.com/containers/fuse-overlayfs/releases/download/{VERSION}/fuse-overlayfs-{arch}"
     );
 
-    eprintln!("fuse-overlayfs not found; downloading static binary to {}...", target.display());
+    eprintln!(
+        "fuse-overlayfs not found; downloading static binary to {}...",
+        target.display()
+    );
 
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;

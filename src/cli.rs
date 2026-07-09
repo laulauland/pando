@@ -15,6 +15,7 @@ use std::{
     ffi::OsStr,
     io,
     path::{Path, PathBuf},
+    process::{Command as ProcessCommand, ExitStatus},
 };
 
 #[derive(Debug, Parser)]
@@ -40,12 +41,21 @@ enum Command {
     /// List Pando workspaces.
     List,
     /// Print workspace facts.
+    #[command(visible_alias = "get")]
     Info {
         /// Pando workspace name.
         name: String,
         /// Print workspace facts as JSON.
-        #[arg(long, required = true)]
+        #[arg(long)]
         json: bool,
+    },
+    /// Open a shell in a workspace.
+    Cd {
+        /// Pando workspace name.
+        name: String,
+        /// Print the workspace path instead of opening a shell.
+        #[arg(long)]
+        print: bool,
     },
     /// Remove a Pando workspace and its state.
     #[command(visible_alias = "rm", alias = "destroy")]
@@ -113,41 +123,56 @@ struct ListRow {
 }
 
 fn format_workspace_list(rows: &[ListRow]) -> String {
-    let name_width = rows
-        .iter()
-        .map(|row| row.name.len())
-        .max()
-        .unwrap_or(0)
-        .max("NAME".len());
-    let age_width = rows
-        .iter()
-        .map(|row| row.age.len())
-        .max()
-        .unwrap_or(0)
-        .max("AGE".len());
-    let base_width = rows
-        .iter()
-        .map(|row| row.base.len())
-        .max()
-        .unwrap_or(0)
-        .max("BASE".len());
+    format_table(
+        ["NAME", "AGE", "BASE", "JJ"],
+        rows.iter().map(|row| {
+            [
+                row.name.as_str(),
+                row.age.as_str(),
+                row.base.as_str(),
+                row.jj.as_str(),
+            ]
+        }),
+    )
+}
 
-    let mut output = format!(
-        "{:<name_width$}  {:>age_width$}  {:<base_width$}  {}\n",
-        "NAME",
-        "AGE",
-        "BASE",
-        "JJ",
-    );
+fn format_table<'a, const N: usize>(
+    headers: [&'a str; N],
+    rows: impl IntoIterator<Item = [&'a str; N]>,
+) -> String {
+    let rows = rows.into_iter().collect::<Vec<_>>();
+    let widths = std::array::from_fn::<_, N, _>(|column| {
+        rows.iter()
+            .map(|row| row[column].len())
+            .max()
+            .unwrap_or(0)
+            .max(headers[column].len())
+    });
 
+    let mut output = String::new();
+    write_table_row(&mut output, headers, widths);
     for row in rows {
-        output.push_str(&format!(
-            "{:<name_width$}  {:>age_width$}  {:<base_width$}  {}\n",
-            row.name, row.age, row.base, row.jj,
-        ));
+        write_table_row(&mut output, row, widths);
     }
 
     output
+}
+
+fn write_table_row<const N: usize>(output: &mut String, row: [&str; N], widths: [usize; N]) {
+    for (column, value) in row.iter().enumerate() {
+        if column > 0 {
+            output.push_str("  ");
+        }
+
+        if column == N - 1 {
+            output.push_str(value);
+        } else if column == 1 {
+            output.push_str(&format!("{:>width$}", value, width = widths[column]));
+        } else {
+            output.push_str(&format!("{:<width$}", value, width = widths[column]));
+        }
+    }
+    output.push('\n');
 }
 
 fn format_age(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
@@ -211,6 +236,44 @@ fn workspace_jj_info(jj: JjMetadata, canonical_root: &Path) -> WorkspaceJjInfo {
     }
 }
 
+fn format_workspace_info_table(info: &WorkspaceInfo) -> String {
+    let state_dir = info.state_dir.to_string_lossy();
+    let workspace_path = info.workspace_path.to_string_lossy();
+    let canonical_root = info.canonical_root.to_string_lossy();
+    let created_at = info.created_at.to_rfc3339();
+    let jj_workspace = info
+        .jj
+        .as_ref()
+        .and_then(|jj| jj.workspace_name.as_deref())
+        .unwrap_or("-");
+    let jj_base = info
+        .jj
+        .as_ref()
+        .and_then(|jj| jj.base_revision.as_deref())
+        .unwrap_or("-");
+
+    format_table(
+        ["FIELD", "VALUE"],
+        [
+            ["name", info.name.as_str()],
+            ["workspace", workspace_path.as_ref()],
+            ["state", state_dir.as_ref()],
+            ["canonical", canonical_root.as_ref()],
+            ["created", created_at.as_str()],
+            ["jj", jj_workspace],
+            ["base", jj_base],
+        ],
+    )
+}
+
+fn open_shell_in_directory(directory: &Path) -> Result<ExitStatus> {
+    let shell = env::var_os("SHELL").unwrap_or_else(|| OsStr::new("sh").to_owned());
+    ProcessCommand::new(shell)
+        .current_dir(directory)
+        .status()
+        .with_context(|| format!("could not open shell in {}", directory.display()))
+}
+
 fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
     match cli.command {
         Command::Create { name, from } => {
@@ -248,10 +311,26 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                 .collect::<Vec<_>>();
             print!("{}", format_workspace_list(&rows));
         }
-        Command::Info { name, json: _ } => {
+        Command::Info { name, json } => {
             let home = pando_home()?;
             let info = workspace_info(&home, &name)?;
-            println!("{}", serde_json::to_string_pretty(&info)?);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                print!("{}", format_workspace_info_table(&info));
+            }
+        }
+        Command::Cd { name, print } => {
+            let home = pando_home()?;
+            let info = workspace_info(&home, &name)?;
+            if print {
+                println!("{}", info.workspace_path.display());
+            } else {
+                let status = open_shell_in_directory(&info.workspace_path)?;
+                if let Some(code) = status.code() {
+                    std::process::exit(code);
+                }
+            }
         }
         Command::Remove {
             name,
@@ -273,8 +352,8 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_name_for_binary, format_age, format_workspace_list, invoked_binary_name,
-        workspace_info, Cli, Command, ListRow,
+        command_name_for_binary, format_age, format_workspace_info_table, format_workspace_list,
+        invoked_binary_name, workspace_info, Cli, Command, ListRow,
     };
     use crate::{
         home::state_dir,
@@ -310,22 +389,52 @@ mod tests {
     }
 
     #[test]
-    fn info_requires_json_flag() {
-        let error = Cli::try_parse_from(["pando", "info", "demo"]).unwrap_err();
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+    fn info_accepts_name_without_json_flag() {
+        let cli = Cli::try_parse_from(["pando", "info", "demo"]).unwrap();
+
+        match cli.command {
+            Command::Info { name, json } => {
+                assert_eq!(name, "demo");
+                assert!(!json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
-    fn info_accepts_name_and_json_flag() {
+    fn get_alias_parses_as_info() {
+        let cli = Cli::try_parse_from(["pd", "get", "demo"]).unwrap();
+
+        match cli.command {
+            Command::Info { name, json } => {
+                assert_eq!(name, "demo");
+                assert!(!json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn info_still_accepts_json_flag_for_compatibility() {
         let cli = Cli::try_parse_from(["pando", "info", "demo", "--json"]).unwrap();
 
         match cli.command {
             Command::Info { name, json } => {
                 assert_eq!(name, "demo");
                 assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cd_accepts_workspace_name_and_print_flag() {
+        let cli = Cli::try_parse_from(["pd", "cd", "demo", "--print"]).unwrap();
+
+        match cli.command {
+            Command::Cd { name, print } => {
+                assert_eq!(name, "demo");
+                assert!(print);
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -348,8 +457,12 @@ mod tests {
         write_metadata(&state_dir, &metadata).unwrap();
 
         let info = workspace_info(home.path(), "demo").unwrap();
+        let table = format_workspace_info_table(&info);
         let value: Value = serde_json::to_value(&info).unwrap();
 
+        assert!(table.contains("FIELD"));
+        assert!(table.contains("VALUE"));
+        assert!(table.contains("pando-demo"));
         assert_eq!(value["name"], "demo");
         assert_eq!(value["state_dir"], state_dir.to_string_lossy().as_ref());
         assert_eq!(
