@@ -105,10 +105,11 @@ install_completion_file() {
   local dir="$3"
   local file="$4"
   local binary_path="${bin_dir}/${bin}"
+  local completion_tmp="${tmp}/completions/${shell}/${file}"
 
-  mkdir -p "${dir}"
-  "${binary_path}" completions "${shell}" >"${tmp}/${file}"
-  install -m 0644 "${tmp}/${file}" "${dir}/${file}"
+  mkdir -p "${dir}" "$(dirname "${completion_tmp}")"
+  "${binary_path}" completions "${shell}" >"${completion_tmp}"
+  install -m 0644 "${completion_tmp}" "${dir}/${file}"
 }
 
 if [ "${install_completions}" != "0" ]; then
