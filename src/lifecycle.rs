@@ -1,7 +1,10 @@
 use crate::{
     backend::CowBackend,
     home::{ensure_home, state_dir, PandoLock},
-    jj::{forget_pando_workspace, has_jj_repo, pando_workspace_name, register_pando_workspace},
+    jj::{
+        forget_pando_workspace, pando_workspace_name, preflight_jj_registration,
+        register_pando_workspace, JjRegistrationPreflight,
+    },
     metadata::{read_metadata, write_metadata, JjMetadata, Metadata},
     naming::validate_name,
 };
@@ -28,9 +31,13 @@ pub fn create_workspace<B: CowBackend>(
     }
 
     let state_dir = state_dir(home, name);
+    if state_dir.exists() {
+        bail!("workspace already exists: {}", state_dir.display());
+    }
+    let jj_preflight = preflight_jj_registration(&source, name, from_revset)?;
     let workspace_path = backend.create(&state_dir, &source)?;
 
-    let jj = match register_jj_if_needed(&source, &workspace_path, name, from_revset) {
+    let jj = match register_jj_if_needed(&workspace_path, jj_preflight) {
         Ok(jj) => jj,
         Err(err) => {
             backend.destroy(&state_dir).with_context(|| {
@@ -50,16 +57,14 @@ pub fn create_workspace<B: CowBackend>(
 }
 
 fn register_jj_if_needed(
-    source: &Path,
     workspace_path: &Path,
-    name: &str,
-    from_revset: Option<&str>,
+    preflight: Option<JjRegistrationPreflight>,
 ) -> Result<Option<JjMetadata>> {
-    if !has_jj_repo(source) {
+    let Some(preflight) = preflight else {
         return Ok(None);
-    }
+    };
 
-    let registration = register_pando_workspace(source, workspace_path, name, from_revset)?;
+    let registration = register_pando_workspace(workspace_path, preflight)?;
     Ok(Some(JjMetadata {
         workspace_name: Some(registration.workspace_name),
         base_commit: Some(registration.base_commit),

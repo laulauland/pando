@@ -6,7 +6,7 @@ use jj_lib::{
     id_prefix::IdPrefixContext,
     object_id::ObjectId as _,
     ref_name::{WorkspaceName, WorkspaceNameBuf},
-    repo::{Repo as _, StoreFactories},
+    repo::{Repo as _, RepoLoader, StoreFactories},
     repo_path::RepoPathUiConverter,
     revset::{
         RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
@@ -60,6 +60,15 @@ pub struct JjRegistration {
     pub base_revision: String,
 }
 
+pub struct JjRegistrationPreflight {
+    repo_loader: RepoLoader,
+    repo_path: PathBuf,
+    workspace_name: WorkspaceNameBuf,
+    base_commit_id: CommitId,
+    copied_source_base_commit_id: Option<CommitId>,
+    base_revision: String,
+}
+
 pub fn pando_workspace_name(name: &str) -> String {
     format!("pando-{name}")
 }
@@ -105,21 +114,78 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-/// Register `workspace_root` as a native jj workspace in `canonical_root`'s repo.
+/// Resolve and validate all jj inputs before workspace population begins.
+pub fn preflight_jj_registration(
+    canonical_root: &Path,
+    name: &str,
+    from_revset: Option<&str>,
+) -> Result<Option<JjRegistrationPreflight>> {
+    if !has_jj_repo(canonical_root) {
+        return Ok(None);
+    }
+
+    let canonical_root = canonical_jj_root(canonical_root)?;
+    let settings = load_user_settings()?;
+    let store_factories = StoreFactories::default();
+    let wc_factories = default_working_copy_factories();
+    let canonical_workspace = Workspace::load(
+        &settings,
+        canonical_root.path(),
+        &store_factories,
+        &wc_factories,
+    )
+    .with_context(|| {
+        format!(
+            "could not load canonical jj workspace: {}",
+            canonical_root.path().display()
+        )
+    })?;
+    let repo = canonical_workspace
+        .repo_loader()
+        .load_at_head()
+        .block_on()?;
+    let base_commit = match from_revset {
+        Some(revset) => resolve_single_revset_commit(
+            &repo,
+            canonical_root.path(),
+            canonical_workspace.workspace_name(),
+            &settings,
+            revset,
+        )?,
+        None => default_base_commit(&repo, canonical_workspace.workspace_name())?,
+    };
+    let copied_source_base_commit_id = match from_revset {
+        Some(_) => Some(
+            default_base_commit(&repo, canonical_workspace.workspace_name())?
+                .id()
+                .clone(),
+        ),
+        None => None,
+    };
+    let base_revision = format_change_revision(repo.as_ref(), base_commit.change_id())?;
+
+    Ok(Some(JjRegistrationPreflight {
+        repo_path: canonical_workspace.repo_path().to_path_buf(),
+        repo_loader: canonical_workspace.repo_loader().clone(),
+        workspace_name: WorkspaceNameBuf::from(pando_workspace_name(name)),
+        base_commit_id: base_commit.id().clone(),
+        copied_source_base_commit_id,
+        base_revision,
+    }))
+}
+
+/// Register `workspace_root` as a native jj workspace using preflighted inputs.
 ///
 /// This uses jj-lib's public `Workspace::init_workspace_with_existing_repo()`
 /// API, which creates an initial "add workspace" operation at the root commit.
 /// We then create a second operation to move the pando workspace's `@` to a
-/// fresh working-copy commit based on the canonical workspace's current `@`
-/// parent. This is intentionally two op-log entries for readability and API
-/// stability in the first native registration implementation.
+/// fresh working-copy commit based on the commit selected during preflight.
+/// This is intentionally two op-log entries for readability and API stability
+/// in the first native registration implementation.
 pub fn register_pando_workspace(
-    canonical_root: &Path,
     workspace_root: &Path,
-    name: &str,
-    from_revset: Option<&str>,
+    preflight: JjRegistrationPreflight,
 ) -> Result<JjRegistration> {
-    let canonical_root = canonical_jj_root(canonical_root)?;
     let workspace_root = workspace_root.canonicalize().with_context(|| {
         format!(
             "could not canonicalize pando workspace root: {}",
@@ -139,44 +205,20 @@ pub fn register_pando_workspace(
         })?;
     }
 
-    let settings = load_user_settings()?;
-    let store_factories = StoreFactories::default();
-    let wc_factories = default_working_copy_factories();
-    let canonical_workspace = Workspace::load(
-        &settings,
-        canonical_root.path(),
-        &store_factories,
-        &wc_factories,
-    )
-    .with_context(|| {
-        format!(
-            "could not load canonical jj workspace: {}",
-            canonical_root.path().display()
-        )
-    })?;
-    let canonical_repo = canonical_workspace
-        .repo_loader()
-        .load_at_head()
-        .block_on()?;
-    let repo_path = canonical_workspace.repo_path().to_path_buf();
-    let workspace_name = WorkspaceNameBuf::from(pando_workspace_name(name));
-    let base_commit = match from_revset {
-        Some(revset) => resolve_single_revset_commit(
-            &canonical_repo,
-            canonical_root.path(),
-            canonical_workspace.workspace_name(),
-            &settings,
-            revset,
-        )?,
-        None => default_base_commit(&canonical_repo, canonical_workspace.workspace_name())?,
-    };
-    let copied_source_base_commit = match from_revset {
-        Some(_) => Some(default_base_commit(
-            &canonical_repo,
-            canonical_workspace.workspace_name(),
-        )?),
-        None => None,
-    };
+    let JjRegistrationPreflight {
+        repo_loader,
+        repo_path,
+        workspace_name,
+        base_commit_id,
+        copied_source_base_commit_id,
+        base_revision,
+    } = preflight;
+    let canonical_repo = repo_loader.load_at_head().block_on()?;
+    let base_commit = canonical_repo.store().get_commit(&base_commit_id)?;
+    let copied_source_base_commit = copied_source_base_commit_id
+        .as_ref()
+        .map(|id| canonical_repo.store().get_commit(id))
+        .transpose()?;
 
     let (mut pando_workspace, repo_after_init) = Workspace::init_workspace_with_existing_repo(
         &workspace_root,
@@ -227,7 +269,7 @@ pub fn register_pando_workspace(
     Ok(JjRegistration {
         workspace_name: workspace_name.as_str().to_owned(),
         base_commit: base_commit.id().hex(),
-        base_revision: format_change_revision(canonical_repo.as_ref(), base_commit.change_id())?,
+        base_revision,
     })
 }
 

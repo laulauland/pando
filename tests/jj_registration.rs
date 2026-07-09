@@ -1,10 +1,15 @@
 use pando::{
-    backend::SimpleCowBackend,
+    backend::{CowBackend, SimpleCowBackend},
     home::state_dir,
     lifecycle::{create_workspace, destroy_workspace},
     metadata::read_metadata,
 };
-use std::{fs, path::Path, process::Command};
+use std::{
+    cell::Cell,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const TEST_USER_NAME: &str = "Pando Test";
 const TEST_USER_EMAIL: &str = "pando@example.invalid";
@@ -202,6 +207,106 @@ fn create_from_multi_commit_revset_fails_without_registering_workspace() {
     );
     assert!(!state_dir(home.path(), "bad-from").exists());
     assert_workspace_list_contains(source.path(), "pando-bad-from", false);
+}
+
+#[test]
+fn create_from_invalid_revset_fails_before_workspace_population() {
+    if skip_if_jj_unavailable("jj create --from preflight integration test") {
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    init_jj_repo_with_base_and_empty_wc(source.path());
+    let home = tempfile::tempdir().unwrap();
+    let population_started = Cell::new(false);
+    let backend = PopulationRecordingBackend {
+        population_started: &population_started,
+    };
+
+    let result = create_workspace(
+        home.path(),
+        &backend,
+        "bad-from",
+        source.path(),
+        Some("not-a-real-revision"),
+    );
+
+    assert!(result.is_err());
+    assert!(
+        !population_started.get(),
+        "invalid --from must fail before the copy backend starts"
+    );
+    assert!(!state_dir(home.path(), "bad-from").exists());
+    assert_workspace_list_contains(source.path(), "pando-bad-from", false);
+}
+
+#[test]
+fn create_from_uses_commit_resolved_before_workspace_population() {
+    if skip_if_jj_unavailable("jj create --from canonicalization integration test") {
+        return;
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    init_jj_repo_with_base_and_empty_wc(source.path());
+    let requested_base = jj_commit_id(source.path(), "@-");
+    let home = tempfile::tempdir().unwrap();
+
+    let workspace = create_workspace(
+        home.path(),
+        &SourceMutatingBackend,
+        "stable-from",
+        source.path(),
+        Some("@-"),
+    )
+    .unwrap();
+
+    assert_ne!(
+        jj_commit_id(source.path(), "@-"),
+        requested_base,
+        "test backend should change what the original revset means"
+    );
+    assert_eq!(
+        jj_commit_id(&workspace, "@-"),
+        requested_base,
+        "registration must use the commit ID resolved before population"
+    );
+}
+
+struct PopulationRecordingBackend<'a> {
+    population_started: &'a Cell<bool>,
+}
+
+impl CowBackend for PopulationRecordingBackend<'_> {
+    fn create(&self, state_dir: &Path, source: &Path) -> anyhow::Result<PathBuf> {
+        self.population_started.set(true);
+        SimpleCowBackend.create(state_dir, source)
+    }
+
+    fn destroy(&self, state_dir: &Path) -> anyhow::Result<()> {
+        SimpleCowBackend.destroy(state_dir)
+    }
+
+    fn workspace_path(&self, state_dir: &Path) -> PathBuf {
+        SimpleCowBackend.workspace_path(state_dir)
+    }
+}
+
+struct SourceMutatingBackend;
+
+impl CowBackend for SourceMutatingBackend {
+    fn create(&self, state_dir: &Path, source: &Path) -> anyhow::Result<PathBuf> {
+        let workspace_path = SimpleCowBackend.create(state_dir, source)?;
+        jj_success(source, &["new"]);
+        Ok(workspace_path)
+    }
+
+    fn destroy(&self, state_dir: &Path) -> anyhow::Result<()> {
+        SimpleCowBackend.destroy(state_dir)
+    }
+
+    fn workspace_path(&self, state_dir: &Path) -> PathBuf {
+        SimpleCowBackend.workspace_path(state_dir)
+    }
 }
 
 fn init_jj_repo(path: &Path) {
