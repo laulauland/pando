@@ -33,19 +33,34 @@ Names cannot contain whitespace or path separators. `--from` takes a `jj` revset
 
 `pando cd <name>` opens your shell in that workspace. Pass `--print` to print the workspace path instead.
 
-`pando remove` deletes the workspace's state directory and forgets the corresponding `jj` workspace from the canonical repo. `--keep-jj-workspace` skips the `jj` forget step but still deletes the state directory.
+`pando remove` deletes the workspace and its state, then forgets the corresponding `jj` workspace from the canonical repo. `--keep-jj-workspace` skips the `jj` forget step but still deletes the Pando-owned files.
 
 `pando completions <shell>` prints a clap-generated completion script to stdout, e.g. `pando completions fish > ~/.config/fish/completions/pando.fish`.
 
 ## How it works
 
-State lives under `$PANDO_HOME` (default `~/.local/state/pando`), one directory per workspace, each containing a `meta.toml` with the canonical root, the workspace path, and any `jj` registration data. A `.lock` file in `$PANDO_HOME` serializes lifecycle operations so concurrent `pando` invocations do not race.
+Pando separates user-facing workspaces from implementation state under `$PANDO_HOME` (default `~/.pando`):
 
-The copy-on-write backend is selected at compile time. On macOS, files are cloned with APFS `clonefile(2)`. On Linux, the workspace is an OverlayFS mount with the source as `lowerdir` and pando-owned `upperdir`/`workdir`, exposed at `merged`. On other platforms, the source tree is copied recursively.
+    ~/.pando/
+    ├── workspaces/
+    │   └── <name>/
+    └── state/
+        ├── .lock
+        └── <name>/
+            ├── meta.toml
+            └── overlay/       # Linux only
+                ├── upper/
+                └── work/
+
+The path under `workspaces/<name>` is the directory to edit or mount into a VM or container. `meta.toml` records the canonical root, workspace path, creation time, and any `jj` registration data. The state lock serializes lifecycle operations so concurrent `pando` invocations do not race.
+
+On the first operational command after upgrading to 0.3, Pando automatically migrates workspaces from the previous default `~/.local/state/pando` layout. Linux OverlayFS workspaces are unmounted, moved, and remounted at their new paths; workspace changes and `jj` registrations are preserved. Custom `$PANDO_HOME` directories are migrated in place.
+
+The copy-on-write backend is selected at compile time. On macOS, files are cloned with APFS `clonefile(2)`. On Linux, `workspaces/<name>` is an OverlayFS mount with the source as `lowerdir` and Pando-owned `upperdir`/`workdir` under `state/<name>/overlay`. On other platforms, the source tree is copied recursively.
 
 When the source contains a `.jj/` directory, pando uses `jj-lib` directly (no shelling out to `jj`) to register the new workspace as `pando-<name>` against the canonical repo, point its `@` at the resolved base commit, and reconcile the working copy. Author identity for the pando-created working-copy commit is read from your `jj` user config (`~/.config/jj/config.toml` or `$XDG_CONFIG_HOME/jj/config.toml`). If `jj` registration fails, the state directory is rolled back so `create` is atomic from the user's point of view.
 
-`remove` is the inverse: it forgets the `jj` workspace via a transaction on the canonical repo and then removes the state directory. If the `jj` forget step fails, the state directory is left in place so the operation can be retried.
+`remove` is the inverse: it forgets the `jj` workspace via a transaction on the canonical repo and then removes the workspace and state directories. If the `jj` forget step fails, both are left in place so the operation can be retried.
 
 ## Install
 
@@ -59,7 +74,7 @@ Or with the release installer:
 
 Set `BIN_DIR` to choose the install directory, or `PANDO_VERSION` to install a specific release:
 
-    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.2.0 bash
+    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.3.0 bash
 
 The installer also writes bash, zsh, and fish completions for both `pando` and `pd` into user completion directories by default. Set `INSTALL_COMPLETIONS=0` to skip them, or override `BASH_COMPLETION_DIR`, `ZSH_COMPLETION_DIR`, or `FISH_COMPLETION_DIR`.
 

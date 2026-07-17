@@ -1,6 +1,6 @@
 use crate::{
     backend::CowBackend,
-    home::{ensure_home, state_dir, PandoLock},
+    home::{ensure_home, state_dir, state_root, workspace_dir, PandoLock},
     jj::{
         forget_pando_workspace, pando_workspace_name, preflight_jj_registration,
         register_pando_workspace, JjRegistrationPreflight,
@@ -31,16 +31,17 @@ pub fn create_workspace<B: CowBackend>(
     }
 
     let state_dir = state_dir(home, name);
-    if state_dir.exists() {
+    let workspace_path = workspace_dir(home, name);
+    if state_dir.exists() || workspace_path.exists() {
         bail!("workspace already exists: {}", state_dir.display());
     }
     let jj_preflight = preflight_jj_registration(&source, name, from_revset)?;
-    let workspace_path = backend.create(&state_dir, &source)?;
+    let workspace_path = backend.create(&state_dir, &workspace_path, &source)?;
 
     let jj = match register_jj_if_needed(&workspace_path, jj_preflight) {
         Ok(jj) => jj,
         Err(err) => {
-            backend.destroy(&state_dir).with_context(|| {
+            backend.destroy(&state_dir, &workspace_path).with_context(|| {
                 format!(
                     "jj registration failed ({err:#}); additionally failed to clean up state dir {}",
                     state_dir.display()
@@ -83,11 +84,20 @@ pub fn destroy_workspace<B: CowBackend>(
     ensure_home(home)?;
 
     let state_dir = state_dir(home, name);
+    let workspace_path = workspace_dir(home, name);
+    if let Ok(metadata) = read_metadata(&state_dir) {
+        if metadata.workspace_path != workspace_path {
+            bail!(
+                "workspace metadata path does not match managed path: {}",
+                workspace_path.display()
+            );
+        }
+    }
     if !keep_jj_workspace {
         forget_registered_jj_workspace(&state_dir)?;
     }
 
-    backend.destroy(&state_dir)
+    backend.destroy(&state_dir, &workspace_path)
 }
 
 fn forget_registered_jj_workspace(state_dir: &Path) -> Result<()> {
@@ -106,12 +116,13 @@ fn forget_registered_jj_workspace(state_dir: &Path) -> Result<()> {
 }
 
 pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
-    if !home.exists() {
+    let state_root = state_root(home);
+    if !state_root.exists() {
         return Ok(Vec::new());
     }
 
     let mut metadata = Vec::new();
-    for entry in fs::read_dir(home)? {
+    for entry in fs::read_dir(state_root)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             if let Ok(item) = read_metadata(&entry.path()) {
@@ -128,7 +139,7 @@ mod tests {
     use super::{create_workspace, destroy_workspace, list_workspaces};
     use crate::{
         backend::SimpleCowBackend,
-        home::state_dir,
+        home::{state_dir, workspace_dir},
         metadata::{metadata_path, read_metadata, write_metadata, JjMetadata, Metadata},
     };
     use proptest::prelude::*;
@@ -146,7 +157,7 @@ mod tests {
             create_workspace(home.path(), &backend, "demo", source.path(), None).unwrap();
         let state_dir = state_dir(home.path(), "demo");
 
-        assert_eq!(workspace, state_dir.join("workspace"));
+        assert_eq!(workspace, workspace_dir(home.path(), "demo"));
         assert!(workspace.join("README.md").exists());
         assert!(metadata_path(&state_dir).exists());
         assert_eq!(list_workspaces(home.path()).unwrap()[0].name, "demo");
@@ -176,7 +187,7 @@ mod tests {
     fn destroy_keeps_state_dir_when_jj_forget_fails() {
         let home = tempfile::tempdir().unwrap();
         let state_dir = state_dir(home.path(), "demo");
-        let workspace_path = state_dir.join("workspace");
+        let workspace_path = workspace_dir(home.path(), "demo");
         let mut metadata = Metadata::new("demo", home.path().join("missing-root"), workspace_path);
         metadata.jj = Some(JjMetadata {
             workspace_name: Some("pando-demo".to_owned()),
@@ -192,6 +203,28 @@ mod tests {
             state_dir.exists(),
             "failed jj forget must not remove pando state"
         );
+    }
+
+    #[test]
+    fn destroy_rejects_workspace_path_outside_managed_layout() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let state_dir = state_dir(home.path(), "demo");
+        write_metadata(
+            &state_dir,
+            &Metadata::new(
+                "demo",
+                home.path().to_path_buf(),
+                outside.path().to_path_buf(),
+            ),
+        )
+        .unwrap();
+
+        let result = destroy_workspace(home.path(), &SimpleCowBackend, "demo", false);
+
+        assert!(result.is_err());
+        assert!(outside.path().exists());
+        assert!(state_dir.exists());
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -252,7 +285,7 @@ mod tests {
                         } else {
                             let workspace = result.unwrap();
                             let state_dir = state_dir(home.path(), name);
-                            prop_assert_eq!(&workspace, &state_dir.join("workspace"));
+                            prop_assert_eq!(&workspace, &workspace_dir(home.path(), name));
                             prop_assert!(workspace.join("README.md").exists());
                             prop_assert!(workspace.join("nested/file.txt").exists());
                             prop_assert!(read_metadata(&state_dir).unwrap().jj.is_none());

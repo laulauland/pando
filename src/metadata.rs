@@ -3,8 +3,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
+use tempfile::NamedTempFile;
 
 pub const METADATA_FILE: &str = "meta.toml";
 
@@ -50,7 +52,11 @@ pub fn metadata_path(state_dir: &Path) -> PathBuf {
 
 pub fn write_metadata(state_dir: &Path, metadata: &Metadata) -> Result<()> {
     fs::create_dir_all(state_dir)?;
-    fs::write(metadata_path(state_dir), toml::to_string_pretty(metadata)?)?;
+    let destination = metadata_path(state_dir);
+    let mut file = NamedTempFile::new_in(state_dir)?;
+    file.write_all(toml::to_string_pretty(metadata)?.as_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist(destination).map_err(|error| error.error)?;
     Ok(())
 }
 

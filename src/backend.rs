@@ -6,16 +6,28 @@ use std::{
 
 const WORKSPACE_DIR: &str = "workspace";
 #[cfg(any(test, target_os = "linux"))]
+const OVERLAY_DIR: &str = "overlay";
+#[cfg(any(test, target_os = "linux"))]
 const OVERLAY_UPPER_DIR: &str = "upper";
 #[cfg(any(test, target_os = "linux"))]
 const OVERLAY_WORK_DIR: &str = "work";
-#[cfg(any(test, target_os = "linux"))]
-const OVERLAY_MERGED_DIR: &str = "merged";
 
 pub trait CowBackend {
-    fn create(&self, state_dir: &Path, source: &Path) -> Result<PathBuf>;
-    fn destroy(&self, state_dir: &Path) -> Result<()>;
-    fn workspace_path(&self, state_dir: &Path) -> PathBuf;
+    fn create(&self, state_dir: &Path, workspace_path: &Path, source: &Path) -> Result<PathBuf>;
+    fn destroy(&self, state_dir: &Path, workspace_path: &Path) -> Result<()>;
+    fn migrate_legacy(
+        &self,
+        legacy_state_dir: &Path,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> Result<PathBuf>;
+    fn resume_migration(
+        &self,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> Result<PathBuf>;
 }
 
 /// Portable, eager-copy backend used by tests and unsupported platforms.
@@ -23,20 +35,34 @@ pub trait CowBackend {
 pub struct SimpleCowBackend;
 
 impl CowBackend for SimpleCowBackend {
-    fn create(&self, state_dir: &Path, source: &Path) -> Result<PathBuf> {
-        ensure_new_state_dir(state_dir)?;
-
-        let workspace_path = self.workspace_path(state_dir);
-        copy_recursively(source, &workspace_path)?;
-        Ok(workspace_path)
+    fn create(&self, state_dir: &Path, workspace_path: &Path, source: &Path) -> Result<PathBuf> {
+        ensure_new_workspace_paths(state_dir, workspace_path)?;
+        fs::create_dir_all(state_dir)?;
+        copy_recursively(source, workspace_path)?;
+        Ok(workspace_path.to_path_buf())
     }
 
-    fn destroy(&self, state_dir: &Path) -> Result<()> {
-        remove_state_dir_if_exists(state_dir)
+    fn destroy(&self, state_dir: &Path, workspace_path: &Path) -> Result<()> {
+        remove_workspace_paths(state_dir, workspace_path)
     }
 
-    fn workspace_path(&self, state_dir: &Path) -> PathBuf {
-        simple_workspace_path(state_dir)
+    fn migrate_legacy(
+        &self,
+        legacy_state_dir: &Path,
+        state_dir: &Path,
+        workspace_path: &Path,
+        _source: &Path,
+    ) -> Result<PathBuf> {
+        migrate_legacy_simple(legacy_state_dir, state_dir, workspace_path)
+    }
+
+    fn resume_migration(
+        &self,
+        state_dir: &Path,
+        workspace_path: &Path,
+        _source: &Path,
+    ) -> Result<PathBuf> {
+        resume_legacy_simple(state_dir, workspace_path)
     }
 }
 
@@ -46,8 +72,8 @@ pub struct OverlayFsBackend;
 
 #[cfg(target_os = "linux")]
 impl CowBackend for OverlayFsBackend {
-    fn create(&self, state_dir: &Path, source: &Path) -> Result<PathBuf> {
-        ensure_new_state_dir(state_dir)?;
+    fn create(&self, state_dir: &Path, workspace_path: &Path, source: &Path) -> Result<PathBuf> {
+        ensure_new_workspace_paths(state_dir, workspace_path)?;
         let source = source.canonicalize().with_context(|| {
             format!(
                 "could not canonicalize overlay lowerdir: {}",
@@ -55,44 +81,48 @@ impl CowBackend for OverlayFsBackend {
             )
         })?;
 
-        let paths = OverlayPaths::new(state_dir);
+        let paths = OverlayPaths::new(state_dir, workspace_path);
         fs::create_dir_all(&paths.upper)
             .with_context(|| format!("could not create upperdir: {}", paths.upper.display()))?;
         fs::create_dir_all(&paths.work)
             .with_context(|| format!("could not create workdir: {}", paths.work.display()))?;
-        fs::create_dir_all(&paths.merged).with_context(|| {
+        fs::create_dir_all(&paths.workspace).with_context(|| {
             format!(
-                "could not create merged mountpoint: {}",
-                paths.merged.display()
+                "could not create workspace mountpoint: {}",
+                paths.workspace.display()
             )
         })?;
 
-        let mount_result = if is_root() {
-            mount_overlay(&source, &paths.upper, &paths.work, &paths.merged)
-        } else {
-            fuse_mount_overlay(&source, &paths.upper, &paths.work, &paths.merged)
-        };
+        let mount_result = mount_platform_overlay(&source, &paths);
         if let Err(err) = mount_result {
-            let _ = remove_state_dir_if_exists(state_dir);
+            let _ = remove_workspace_paths(state_dir, workspace_path);
             return Err(err);
         }
-        Ok(paths.merged)
+        Ok(paths.workspace)
     }
 
-    fn destroy(&self, state_dir: &Path) -> Result<()> {
-        let merged = self.workspace_path(state_dir);
-        if merged.exists() {
-            match detect_mount_type(&merged) {
-                Some(MountType::Kernel) => unmount_overlay(&merged)?,
-                Some(MountType::Fuse) => fuse_unmount(&merged)?,
-                None => {}
-            }
-        }
-        remove_state_dir_if_exists(state_dir)
+    fn destroy(&self, state_dir: &Path, workspace_path: &Path) -> Result<()> {
+        unmount_if_mounted(workspace_path)?;
+        remove_workspace_paths(state_dir, workspace_path)
     }
 
-    fn workspace_path(&self, state_dir: &Path) -> PathBuf {
-        overlay_merged_path(state_dir)
+    fn migrate_legacy(
+        &self,
+        legacy_state_dir: &Path,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> Result<PathBuf> {
+        migrate_legacy_overlay(legacy_state_dir, state_dir, workspace_path, source)
+    }
+
+    fn resume_migration(
+        &self,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> Result<PathBuf> {
+        resume_legacy_overlay(state_dir, workspace_path, source)
     }
 }
 
@@ -102,22 +132,36 @@ pub struct ApfsCloneBackend;
 
 #[cfg(target_os = "macos")]
 impl CowBackend for ApfsCloneBackend {
-    fn create(&self, state_dir: &Path, source: &Path) -> Result<PathBuf> {
-        ensure_new_state_dir(state_dir)?;
+    fn create(&self, state_dir: &Path, workspace_path: &Path, source: &Path) -> Result<PathBuf> {
+        ensure_new_workspace_paths(state_dir, workspace_path)?;
 
         fs::create_dir_all(state_dir)
             .with_context(|| format!("could not create state dir: {}", state_dir.display()))?;
-        let workspace_path = self.workspace_path(state_dir);
         clone_path(source, &workspace_path)?;
-        Ok(workspace_path)
+        Ok(workspace_path.to_path_buf())
     }
 
-    fn destroy(&self, state_dir: &Path) -> Result<()> {
-        remove_state_dir_if_exists(state_dir)
+    fn destroy(&self, state_dir: &Path, workspace_path: &Path) -> Result<()> {
+        remove_workspace_paths(state_dir, workspace_path)
     }
 
-    fn workspace_path(&self, state_dir: &Path) -> PathBuf {
-        simple_workspace_path(state_dir)
+    fn migrate_legacy(
+        &self,
+        legacy_state_dir: &Path,
+        state_dir: &Path,
+        workspace_path: &Path,
+        _source: &Path,
+    ) -> Result<PathBuf> {
+        migrate_legacy_simple(legacy_state_dir, state_dir, workspace_path)
+    }
+
+    fn resume_migration(
+        &self,
+        state_dir: &Path,
+        workspace_path: &Path,
+        _source: &Path,
+    ) -> Result<PathBuf> {
+        resume_legacy_simple(state_dir, workspace_path)
     }
 }
 
@@ -128,13 +172,13 @@ pub type PlatformCowBackend = ApfsCloneBackend;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub type PlatformCowBackend = SimpleCowBackend;
 
-fn simple_workspace_path(state_dir: &Path) -> PathBuf {
+fn legacy_simple_workspace_path(state_dir: &Path) -> PathBuf {
     state_dir.join(WORKSPACE_DIR)
 }
 
 #[cfg(any(test, target_os = "linux"))]
-fn overlay_merged_path(state_dir: &Path) -> PathBuf {
-    state_dir.join(OVERLAY_MERGED_DIR)
+fn legacy_overlay_workspace_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("merged")
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -142,33 +186,266 @@ fn overlay_merged_path(state_dir: &Path) -> PathBuf {
 struct OverlayPaths {
     upper: PathBuf,
     work: PathBuf,
-    merged: PathBuf,
+    workspace: PathBuf,
 }
 
 #[cfg(any(test, target_os = "linux"))]
 impl OverlayPaths {
-    pub fn new(state_dir: &Path) -> Self {
+    pub fn new(state_dir: &Path, workspace_path: &Path) -> Self {
+        let overlay = state_dir.join(OVERLAY_DIR);
         Self {
-            upper: state_dir.join(OVERLAY_UPPER_DIR),
-            work: state_dir.join(OVERLAY_WORK_DIR),
-            merged: overlay_merged_path(state_dir),
+            upper: overlay.join(OVERLAY_UPPER_DIR),
+            work: overlay.join(OVERLAY_WORK_DIR),
+            workspace: workspace_path.to_path_buf(),
         }
     }
 }
 
-fn ensure_new_state_dir(state_dir: &Path) -> Result<()> {
+fn ensure_new_workspace_paths(state_dir: &Path, workspace_path: &Path) -> Result<()> {
     if state_dir.exists() {
         bail!("workspace already exists: {}", state_dir.display());
+    }
+    if workspace_path.exists() {
+        bail!("workspace already exists: {}", workspace_path.display());
     }
     Ok(())
 }
 
-fn remove_state_dir_if_exists(state_dir: &Path) -> Result<()> {
+fn remove_workspace_paths(state_dir: &Path, workspace_path: &Path) -> Result<()> {
+    if workspace_path.exists() {
+        fs::remove_dir_all(workspace_path)
+            .with_context(|| format!("could not remove workspace: {}", workspace_path.display()))?;
+    }
     if state_dir.exists() {
         fs::remove_dir_all(state_dir)
             .with_context(|| format!("could not remove state dir: {}", state_dir.display()))?;
     }
     Ok(())
+}
+
+fn migrate_legacy_simple(
+    legacy_state_dir: &Path,
+    state_dir: &Path,
+    workspace_path: &Path,
+) -> Result<PathBuf> {
+    ensure_new_workspace_paths(state_dir, workspace_path)?;
+    fs::create_dir_all(
+        state_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("state directory has no parent"))?,
+    )?;
+    fs::create_dir_all(
+        workspace_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("workspace path has no parent"))?,
+    )?;
+
+    fs::rename(legacy_state_dir, state_dir).with_context(|| {
+        format!(
+            "could not move legacy state {} to {}",
+            legacy_state_dir.display(),
+            state_dir.display()
+        )
+    })?;
+
+    let legacy_workspace = legacy_simple_workspace_path(state_dir);
+    if let Err(err) = fs::rename(&legacy_workspace, workspace_path) {
+        let migration_err = anyhow::Error::from(err).context(format!(
+            "could not move legacy workspace {} to {}",
+            legacy_workspace.display(),
+            workspace_path.display()
+        ));
+        return match fs::rename(state_dir, legacy_state_dir) {
+            Ok(()) => Err(migration_err),
+            Err(rollback_err) => Err(migration_err)
+                .context(format!("migration rollback also failed: {rollback_err}")),
+        };
+    }
+
+    Ok(workspace_path.to_path_buf())
+}
+
+fn resume_legacy_simple(state_dir: &Path, workspace_path: &Path) -> Result<PathBuf> {
+    if workspace_path.exists() {
+        return Ok(workspace_path.to_path_buf());
+    }
+    let legacy_workspace = legacy_simple_workspace_path(state_dir);
+    if !legacy_workspace.exists() {
+        bail!(
+            "workspace data missing from both {} and {}",
+            legacy_workspace.display(),
+            workspace_path.display()
+        );
+    }
+    fs::create_dir_all(
+        workspace_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("workspace path has no parent"))?,
+    )?;
+    fs::rename(&legacy_workspace, workspace_path).with_context(|| {
+        format!(
+            "could not move legacy workspace {} to {}",
+            legacy_workspace.display(),
+            workspace_path.display()
+        )
+    })?;
+    Ok(workspace_path.to_path_buf())
+}
+
+#[cfg(target_os = "linux")]
+fn migrate_legacy_overlay(
+    legacy_state_dir: &Path,
+    state_dir: &Path,
+    workspace_path: &Path,
+    source: &Path,
+) -> Result<PathBuf> {
+    ensure_new_workspace_paths(state_dir, workspace_path)?;
+    let legacy_workspace = legacy_overlay_workspace_path(legacy_state_dir);
+    unmount_if_mounted(&legacy_workspace)?;
+
+    let result =
+        migrate_unmounted_legacy_overlay(legacy_state_dir, state_dir, workspace_path, source);
+    if let Err(err) = result {
+        let rollback =
+            rollback_legacy_overlay_migration(legacy_state_dir, state_dir, workspace_path, source);
+        return match rollback {
+            Ok(()) => Err(err),
+            Err(rollback_err) => {
+                Err(err).context(format!("migration rollback also failed: {rollback_err:#}"))
+            }
+        };
+    }
+
+    Ok(workspace_path.to_path_buf())
+}
+
+#[cfg(target_os = "linux")]
+fn migrate_unmounted_legacy_overlay(
+    legacy_state_dir: &Path,
+    state_dir: &Path,
+    workspace_path: &Path,
+    source: &Path,
+) -> Result<()> {
+    fs::create_dir_all(
+        state_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("state directory has no parent"))?,
+    )?;
+    fs::create_dir_all(
+        workspace_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("workspace path has no parent"))?,
+    )?;
+    fs::rename(legacy_state_dir, state_dir)?;
+
+    resume_legacy_overlay(state_dir, workspace_path, source)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn resume_legacy_overlay(
+    state_dir: &Path,
+    workspace_path: &Path,
+    source: &Path,
+) -> Result<PathBuf> {
+    if detect_mount_type(workspace_path).is_some() {
+        return Ok(workspace_path.to_path_buf());
+    }
+
+    let paths = OverlayPaths::new(state_dir, workspace_path);
+    let overlay_dir = state_dir.join(OVERLAY_DIR);
+    fs::create_dir_all(&overlay_dir)?;
+    let legacy_upper = state_dir.join(OVERLAY_UPPER_DIR);
+    if !paths.upper.exists() {
+        if !legacy_upper.exists() {
+            bail!("overlay upperdir is missing: {}", paths.upper.display());
+        }
+        fs::rename(&legacy_upper, &paths.upper)?;
+    } else if legacy_upper.exists() {
+        bail!(
+            "overlay upperdir exists in both legacy and migrated locations for {}",
+            state_dir.display()
+        );
+    }
+
+    let legacy_work = state_dir.join(OVERLAY_WORK_DIR);
+    if legacy_work.exists() {
+        fs::remove_dir_all(legacy_work)?;
+    }
+    if paths.work.exists() {
+        fs::remove_dir_all(&paths.work)?;
+    }
+    fs::create_dir(&paths.work)?;
+
+    let legacy_workspace = legacy_overlay_workspace_path(state_dir);
+    if !workspace_path.exists() && legacy_workspace.exists() {
+        fs::rename(&legacy_workspace, workspace_path)?;
+    } else if workspace_path.exists() && legacy_workspace.exists() {
+        bail!(
+            "workspace mountpoint exists in both legacy and migrated locations for {}",
+            state_dir.display()
+        );
+    } else if !workspace_path.exists() {
+        fs::create_dir_all(workspace_path)?;
+    }
+
+    mount_platform_overlay(source, &paths)?;
+    Ok(workspace_path.to_path_buf())
+}
+
+#[cfg(target_os = "linux")]
+fn rollback_legacy_overlay_migration(
+    legacy_state_dir: &Path,
+    state_dir: &Path,
+    workspace_path: &Path,
+    source: &Path,
+) -> Result<()> {
+    if !state_dir.exists() {
+        let paths = OverlayPaths {
+            upper: legacy_state_dir.join(OVERLAY_UPPER_DIR),
+            work: legacy_state_dir.join(OVERLAY_WORK_DIR),
+            workspace: legacy_overlay_workspace_path(legacy_state_dir),
+        };
+        return mount_platform_overlay(source, &paths);
+    }
+
+    unmount_if_mounted(workspace_path)?;
+    let paths = OverlayPaths::new(state_dir, workspace_path);
+    let legacy_workspace = legacy_overlay_workspace_path(state_dir);
+    if workspace_path.exists() && legacy_workspace.exists() {
+        bail!(
+            "cannot roll back: workspace mountpoint exists in both legacy and migrated locations"
+        );
+    }
+    if paths.upper.exists() && state_dir.join(OVERLAY_UPPER_DIR).exists() {
+        bail!("cannot roll back: upperdir exists in both legacy and migrated locations");
+    }
+    if workspace_path.exists() && !legacy_workspace.exists() {
+        fs::rename(workspace_path, &legacy_workspace)?;
+    }
+    if paths.work.exists() {
+        fs::remove_dir_all(&paths.work)?;
+    }
+    if paths.upper.exists() && !state_dir.join(OVERLAY_UPPER_DIR).exists() {
+        fs::rename(&paths.upper, state_dir.join(OVERLAY_UPPER_DIR))?;
+    }
+    let overlay_dir = state_dir.join(OVERLAY_DIR);
+    if overlay_dir.exists() {
+        fs::remove_dir_all(overlay_dir)?;
+    }
+    let legacy_work = state_dir.join(OVERLAY_WORK_DIR);
+    if legacy_work.exists() {
+        fs::remove_dir_all(&legacy_work)?;
+    }
+    fs::create_dir(&legacy_work)?;
+    fs::rename(state_dir, legacy_state_dir)?;
+
+    let legacy_paths = OverlayPaths {
+        upper: legacy_state_dir.join(OVERLAY_UPPER_DIR),
+        work: legacy_state_dir.join(OVERLAY_WORK_DIR),
+        workspace: legacy_overlay_workspace_path(legacy_state_dir),
+    };
+    mount_platform_overlay(source, &legacy_paths)
 }
 
 fn copy_recursively(source: &Path, destination: &Path) -> Result<()> {
@@ -262,6 +539,15 @@ fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Resu
 }
 
 #[cfg(target_os = "linux")]
+fn mount_platform_overlay(source: &Path, paths: &OverlayPaths) -> Result<()> {
+    if is_root() {
+        mount_overlay(source, &paths.upper, &paths.work, &paths.workspace)
+    } else {
+        fuse_mount_overlay(source, &paths.upper, &paths.work, &paths.workspace)
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn unmount_overlay(merged: &Path) -> Result<()> {
     let target = path_to_cstring(merged)?;
     let rc = unsafe { libc::umount(target.as_ptr()) };
@@ -305,6 +591,18 @@ fn detect_mount_type(merged: &Path) -> Option<MountType> {
 }
 
 #[cfg(target_os = "linux")]
+fn unmount_if_mounted(workspace_path: &Path) -> Result<()> {
+    if !workspace_path.exists() {
+        return Ok(());
+    }
+    match detect_mount_type(workspace_path) {
+        Some(MountType::Kernel) => unmount_overlay(workspace_path),
+        Some(MountType::Fuse) => fuse_unmount(workspace_path),
+        None => Ok(()),
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn fuse_mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Result<()> {
     let binary = resolve_fuse_overlayfs()?;
     let options = overlay_mount_options(lower, upper, work);
@@ -328,7 +626,7 @@ fn fuse_mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) ->
 #[cfg(target_os = "linux")]
 fn fuse_unmount(merged: &Path) -> Result<()> {
     let binary = resolve_fusermount();
-    let output = std::process::Command::new(&binary)
+    let output = std::process::Command::new(binary)
         .arg("-u")
         .arg(merged)
         .output()
@@ -466,9 +764,7 @@ fn copy_symlink(source: &Path, destination: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        overlay_merged_path, simple_workspace_path, CowBackend, OverlayPaths, SimpleCowBackend,
-    };
+    use super::{CowBackend, OverlayPaths, SimpleCowBackend};
     use std::{fs, path::PathBuf};
 
     #[test]
@@ -477,37 +773,35 @@ mod tests {
         fs::create_dir(source.path().join("nested")).unwrap();
         fs::write(source.path().join("nested/file.txt"), "hello").unwrap();
 
-        let state_dir = tempfile::tempdir().unwrap().path().join("copy");
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state/copy");
+        let workspace_path = root.path().join("workspaces/copy");
         let backend = SimpleCowBackend;
 
-        let workspace = backend.create(&state_dir, source.path()).unwrap();
+        let workspace = backend
+            .create(&state_dir, &workspace_path, source.path())
+            .unwrap();
         assert_eq!(
             fs::read_to_string(workspace.join("nested/file.txt")).unwrap(),
             "hello"
         );
-        assert_eq!(workspace, backend.workspace_path(&state_dir));
+        assert_eq!(workspace, workspace_path);
 
-        backend.destroy(&state_dir).unwrap();
+        backend.destroy(&state_dir, &workspace).unwrap();
         assert!(!state_dir.exists());
+        assert!(!workspace.exists());
     }
 
     #[test]
     fn backend_workspace_paths_match_specs() {
-        let state_dir = PathBuf::from("/tmp/pando/workspaces/demo");
+        let state_dir = PathBuf::from("/tmp/pando/state/demo");
+        let workspace_path = PathBuf::from("/tmp/pando/workspaces/demo");
         assert_eq!(
-            simple_workspace_path(&state_dir),
-            PathBuf::from("/tmp/pando/workspaces/demo/workspace")
-        );
-        assert_eq!(
-            overlay_merged_path(&state_dir),
-            PathBuf::from("/tmp/pando/workspaces/demo/merged")
-        );
-        assert_eq!(
-            OverlayPaths::new(&state_dir),
+            OverlayPaths::new(&state_dir, &workspace_path),
             OverlayPaths {
-                upper: PathBuf::from("/tmp/pando/workspaces/demo/upper"),
-                work: PathBuf::from("/tmp/pando/workspaces/demo/work"),
-                merged: PathBuf::from("/tmp/pando/workspaces/demo/merged"),
+                upper: PathBuf::from("/tmp/pando/state/demo/overlay/upper"),
+                work: PathBuf::from("/tmp/pando/state/demo/overlay/work"),
+                workspace: workspace_path,
             }
         );
     }
@@ -532,9 +826,12 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         fs::write(source.path().join("file.txt"), "hello").unwrap();
         let state_dir = tempfile::tempdir().unwrap().path().join("clone");
+        let workspace_path = tempfile::tempdir().unwrap().path().join("workspace");
         let backend = super::ApfsCloneBackend;
 
-        let workspace = backend.create(&state_dir, source.path()).unwrap();
+        let workspace = backend
+            .create(&state_dir, &workspace_path, source.path())
+            .unwrap();
         assert_eq!(
             fs::read_to_string(workspace.join("file.txt")).unwrap(),
             "hello"

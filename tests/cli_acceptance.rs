@@ -1,6 +1,6 @@
 use pando::{
     backend::SimpleCowBackend,
-    home::state_dir,
+    home::{state_dir, workspace_dir},
     lifecycle::{create_workspace, destroy_workspace, list_workspaces},
     metadata::read_metadata,
 };
@@ -60,7 +60,7 @@ fn cli_create_list_remove_lifecycle_is_end_to_end() {
     let workspace = create_workspace(home.path(), &backend, "demo", source.path(), None).unwrap();
     let demo_state_dir = state_dir(home.path(), "demo");
 
-    assert_eq!(workspace, demo_state_dir.join("workspace"));
+    assert_eq!(workspace, workspace_dir(home.path(), "demo"));
     assert_eq!(
         fs::read_to_string(workspace.join("README.md")).unwrap(),
         "canonical"
@@ -91,6 +91,7 @@ fn cli_create_list_remove_lifecycle_is_end_to_end() {
         !demo_state_dir.exists(),
         "remove should delete the state dir"
     );
+    assert!(!workspace_dir(home.path(), "demo").exists());
     assert!(list_workspaces(home.path()).unwrap().is_empty());
 }
 
@@ -273,7 +274,9 @@ fn cli_two_named_workspaces_do_not_interfere() {
 
     destroy_workspace(home.path(), &backend, "alpha", false).unwrap();
     assert!(!state_dir(home.path(), "alpha").exists());
+    assert!(!workspace_dir(home.path(), "alpha").exists());
     assert!(state_dir(home.path(), "beta").exists());
+    assert!(workspace_dir(home.path(), "beta").exists());
     assert_eq!(
         fs::read_to_string(beta.join("shared.txt")).unwrap(),
         "beta edit"

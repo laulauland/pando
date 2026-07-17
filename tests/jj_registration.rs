@@ -277,35 +277,75 @@ struct PopulationRecordingBackend<'a> {
 }
 
 impl CowBackend for PopulationRecordingBackend<'_> {
-    fn create(&self, state_dir: &Path, source: &Path) -> anyhow::Result<PathBuf> {
+    fn create(
+        &self,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> anyhow::Result<PathBuf> {
         self.population_started.set(true);
-        SimpleCowBackend.create(state_dir, source)
+        SimpleCowBackend.create(state_dir, workspace_path, source)
     }
 
-    fn destroy(&self, state_dir: &Path) -> anyhow::Result<()> {
-        SimpleCowBackend.destroy(state_dir)
+    fn destroy(&self, state_dir: &Path, workspace_path: &Path) -> anyhow::Result<()> {
+        SimpleCowBackend.destroy(state_dir, workspace_path)
     }
 
-    fn workspace_path(&self, state_dir: &Path) -> PathBuf {
-        SimpleCowBackend.workspace_path(state_dir)
+    fn migrate_legacy(
+        &self,
+        legacy_state_dir: &Path,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        SimpleCowBackend.migrate_legacy(legacy_state_dir, state_dir, workspace_path, source)
+    }
+
+    fn resume_migration(
+        &self,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        SimpleCowBackend.resume_migration(state_dir, workspace_path, source)
     }
 }
 
 struct SourceMutatingBackend;
 
 impl CowBackend for SourceMutatingBackend {
-    fn create(&self, state_dir: &Path, source: &Path) -> anyhow::Result<PathBuf> {
-        let workspace_path = SimpleCowBackend.create(state_dir, source)?;
+    fn create(
+        &self,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        let workspace_path = SimpleCowBackend.create(state_dir, workspace_path, source)?;
         jj_success(source, &["new"]);
         Ok(workspace_path)
     }
 
-    fn destroy(&self, state_dir: &Path) -> anyhow::Result<()> {
-        SimpleCowBackend.destroy(state_dir)
+    fn destroy(&self, state_dir: &Path, workspace_path: &Path) -> anyhow::Result<()> {
+        SimpleCowBackend.destroy(state_dir, workspace_path)
     }
 
-    fn workspace_path(&self, state_dir: &Path) -> PathBuf {
-        SimpleCowBackend.workspace_path(state_dir)
+    fn migrate_legacy(
+        &self,
+        legacy_state_dir: &Path,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        SimpleCowBackend.migrate_legacy(legacy_state_dir, state_dir, workspace_path, source)
+    }
+
+    fn resume_migration(
+        &self,
+        state_dir: &Path,
+        workspace_path: &Path,
+        source: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        SimpleCowBackend.resume_migration(state_dir, workspace_path, source)
     }
 }
 

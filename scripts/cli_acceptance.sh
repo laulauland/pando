@@ -46,9 +46,12 @@ grep -q 'NAME.*AGE.*BASE.*JJ' <<< "$list_output"
 grep -q 'alpha.*-.*-' <<< "$list_output"
 grep -q 'beta.*-.*-' <<< "$list_output"
 "$PANDO" remove alpha --keep-jj-workspace
-assert_missing "$PANDO_HOME/alpha"
-assert_exists "$PANDO_HOME/beta"
+assert_missing "$PANDO_HOME/state/alpha"
+assert_missing "$PANDO_HOME/workspaces/alpha"
+assert_exists "$PANDO_HOME/state/beta"
+assert_exists "$PANDO_HOME/workspaces/beta"
 "$PANDO" rm beta
-assert_missing "$PANDO_HOME/beta"
+assert_missing "$PANDO_HOME/state/beta"
+assert_missing "$PANDO_HOME/workspaces/beta"
 
 echo "CLI acceptance passed."

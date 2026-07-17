@@ -14,7 +14,7 @@ Usage:
   curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | bash
 
 Environment:
-  PANDO_VERSION         Version to install, e.g. 0.2.0 or v0.2.0 (default: latest)
+  PANDO_VERSION         Version to install, e.g. 0.3.0 or v0.3.0 (default: latest)
   BIN_DIR               Install directory (default: /usr/local/bin)
   INSTALL_COMPLETIONS   Install shell completions: 1 or 0 (default: 1)
   BASH_COMPLETION_DIR   Bash completion directory

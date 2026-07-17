@@ -1,8 +1,9 @@
 use crate::{
     backend::PlatformCowBackend,
-    home::{pando_home, state_dir},
+    home::{legacy_pando_home, pando_home, state_dir},
     lifecycle::{create_workspace, destroy_workspace, list_workspaces},
     metadata::{read_metadata, JjMetadata},
+    migration::migrate_legacy_home_if_needed,
     naming::validate_name,
 };
 use anyhow::{Context, Result};
@@ -274,18 +275,25 @@ fn open_shell_in_directory(directory: &Path) -> Result<ExitStatus> {
         .with_context(|| format!("could not open shell in {}", directory.display()))
 }
 
+fn prepare_home() -> Result<(PathBuf, PlatformCowBackend)> {
+    let home = pando_home()?;
+    let legacy_home = legacy_pando_home()?;
+    let backend = PlatformCowBackend::default();
+    migrate_legacy_home_if_needed(&legacy_home, &home, &backend)?;
+    Ok((home, backend))
+}
+
 fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
     match cli.command {
         Command::Create { name, from } => {
-            let home = pando_home()?;
-            let backend = PlatformCowBackend::default();
+            let (home, backend) = prepare_home()?;
             let source = env::current_dir()?;
             let workspace_path =
                 create_workspace(&home, &backend, &name, &source, from.as_deref())?;
             println!("{}", workspace_path.display());
         }
         Command::List => {
-            let home = pando_home()?;
+            let (home, _) = prepare_home()?;
             let rows = list_workspaces(&home)?
                 .into_iter()
                 .map(|metadata| {
@@ -312,7 +320,7 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
             print!("{}", format_workspace_list(&rows));
         }
         Command::Info { name, json } => {
-            let home = pando_home()?;
+            let (home, _) = prepare_home()?;
             let info = workspace_info(&home, &name)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&info)?);
@@ -321,7 +329,7 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
             }
         }
         Command::Cd { name, print } => {
-            let home = pando_home()?;
+            let (home, _) = prepare_home()?;
             let info = workspace_info(&home, &name)?;
             if print {
                 println!("{}", info.workspace_path.display());
@@ -336,8 +344,7 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
             name,
             keep_jj_workspace,
         } => {
-            let home = pando_home()?;
-            let backend = PlatformCowBackend::default();
+            let (home, backend) = prepare_home()?;
             destroy_workspace(&home, &backend, &name, keep_jj_workspace)?;
         }
         Command::Completions { shell } => {
