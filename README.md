@@ -6,7 +6,10 @@
 
 ## Usage
 
-    pando create <name> [--from <revset>]
+    pando create <name> [--from <revset>] [--runtime boxlite] [--image <image>]
+    pando exec <name> -- <command> [args...]
+    pando shell <name>
+    pando stop <name>
     pando list
     pando info <name> [--json]
     pando get  <name> [--json]
@@ -20,6 +23,16 @@ The same CLI is also installed as `pd` for shorter invocations (`pd create`, `pd
 `pando create` runs from the current directory and prints the new workspace's absolute path to stdout, so the common shell idiom is:
 
     cd "$(pando create feature-x)"
+
+Build with `--features microvm-boxlite` to attach an optional BoxLite micro-VM to a workspace. The smallest runtime workflow is:
+
+    pando create feature-x --runtime boxlite --image alpine:3.22
+    pando exec feature-x -- uname -a
+    pando shell feature-x
+    pando stop feature-x
+    pando remove feature-x
+
+`exec` preserves argument boundaries and returns the guest command's exit status. `shell` opens an interactive `/bin/sh`; both commands restart a stopped runtime. Runtime workspaces are mounted read-write at `/workspace`, which is also the guest command's working directory. `info` reports the configured image, provider ID, and observed runtime state. Removing a runtime workspace stops and removes its VM before deleting the copy-on-write workspace.
 
 Names cannot contain whitespace or path separators. `--from` takes a `jj` revset that must resolve to exactly one commit; it is silently ignored when the source is not a `jj` repository. With no `--from`, the new workspace is based on the canonical workspace's `@-`.
 

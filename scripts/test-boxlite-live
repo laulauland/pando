@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Cargo's CARGO_BIN_EXE_pando points at target/debug/pando. A no-feature command can
+# replace that shared path without invalidating Cargo's feature-build fingerprint.
+# Isolate the live build so the executable selected by the integration test can
+# only have been produced with microvm-boxlite enabled.
+CARGO_TARGET_DIR="$repo_dir/target/microvm-live" \
+  cargo test \
+  --manifest-path "$repo_dir/Cargo.toml" \
+  --features microvm-boxlite \
+  --test boxlite_workspace \
+  -- \
+  --ignored \
+  --nocapture

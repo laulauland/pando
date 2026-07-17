@@ -6,9 +6,11 @@ use crate::{
     migration::migrate_legacy_home_if_needed,
     naming::validate_name,
 };
+#[cfg(not(feature = "microvm-boxlite"))]
+use anyhow::bail;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use serde::Serialize;
 use std::{
@@ -35,6 +37,12 @@ enum Command {
         /// Select the jj base revision for the new workspace. Ignored outside jj repositories.
         #[arg(long, value_name = "REVSET")]
         from: Option<String>,
+        /// Run the workspace in an optional execution environment.
+        #[arg(long, value_enum)]
+        runtime: Option<RuntimeChoice>,
+        /// OCI image for the execution environment.
+        #[arg(long, requires = "runtime")]
+        image: Option<String>,
     },
     /// List Pando workspaces.
     List,
@@ -55,6 +63,24 @@ enum Command {
         #[arg(long)]
         print: bool,
     },
+    /// Execute a command in a workspace runtime.
+    Exec {
+        /// Pando workspace name.
+        name: String,
+        /// Command and arguments to execute without shell interpretation.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Open an interactive shell in a workspace runtime.
+    Shell {
+        /// Pando workspace name.
+        name: String,
+    },
+    /// Stop a workspace runtime.
+    Stop {
+        /// Pando workspace name.
+        name: String,
+    },
     /// Remove a Pando workspace and its state.
     #[command(visible_alias = "rm", alias = "destroy")]
     Remove {
@@ -69,6 +95,11 @@ enum Command {
         /// Shell to generate completions for.
         shell: Shell,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RuntimeChoice {
+    Boxlite,
 }
 
 pub fn run() -> Result<()> {
@@ -195,6 +226,17 @@ struct WorkspaceInfo {
     created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     jj: Option<WorkspaceJjInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<WorkspaceRuntimeInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct WorkspaceRuntimeInfo {
+    kind: &'static str,
+    provider_id: crate::runtime::RuntimeIdentity,
+    image: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<crate::runtime::RuntimeStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -212,7 +254,23 @@ fn workspace_info(home: &Path, name: &str) -> Result<WorkspaceInfo> {
     let metadata =
         read_metadata(&state_dir).with_context(|| format!("workspace not found: {name}"))?;
 
-    Ok(WorkspaceInfo {
+    Ok(workspace_info_from_metadata(state_dir, metadata))
+}
+
+fn workspace_info_from_metadata(
+    state_dir: PathBuf,
+    metadata: crate::metadata::Metadata,
+) -> WorkspaceInfo {
+    let runtime = metadata
+        .runtime
+        .clone()
+        .map(|runtime| WorkspaceRuntimeInfo {
+            kind: "boxlite",
+            provider_id: runtime.identity,
+            image: runtime.image,
+            state: None,
+        });
+    WorkspaceInfo {
         name: metadata.name,
         state_dir,
         workspace_path: metadata.workspace_path,
@@ -221,7 +279,8 @@ fn workspace_info(home: &Path, name: &str) -> Result<WorkspaceInfo> {
         jj: metadata
             .jj
             .map(|jj| workspace_jj_info(jj, &metadata.canonical_root)),
-    })
+        runtime,
+    }
 }
 
 fn workspace_jj_info(jj: JjMetadata, canonical_root: &Path) -> WorkspaceJjInfo {
@@ -249,6 +308,27 @@ fn format_workspace_info_table(info: &WorkspaceInfo) -> String {
         .as_ref()
         .and_then(|jj| jj.base_revision.as_deref())
         .unwrap_or("-");
+    let runtime_kind = info
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.kind)
+        .unwrap_or("-");
+    let runtime_id = info
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.provider_id.as_str())
+        .unwrap_or("-");
+    let runtime_image = info
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.image.as_str())
+        .unwrap_or("-");
+    let runtime_state = info
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.state)
+        .map(|state| format!("{state:?}").to_ascii_lowercase())
+        .unwrap_or_else(|| "-".to_owned());
 
     format_table(
         ["FIELD", "VALUE"],
@@ -260,6 +340,10 @@ fn format_workspace_info_table(info: &WorkspaceInfo) -> String {
             ["created", created_at.as_str()],
             ["jj", jj_workspace],
             ["base", jj_base],
+            ["runtime", runtime_kind],
+            ["runtime-id", runtime_id],
+            ["image", runtime_image],
+            ["runtime-state", runtime_state.as_str()],
         ],
     )
 }
@@ -282,11 +366,35 @@ fn prepare_home() -> Result<(PathBuf, PlatformCowBackend)> {
 
 fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
     match cli.command {
-        Command::Create { name, from } => {
+        Command::Create {
+            name,
+            from,
+            runtime,
+            image,
+        } => {
             let (home, backend) = prepare_home()?;
             let source = env::current_dir()?;
-            let workspace_path =
-                create_workspace(&home, &backend, &name, &source, from.as_deref())?;
+            let workspace_path = match runtime {
+                None => create_workspace(&home, &backend, &name, &source, from.as_deref())?,
+                Some(RuntimeChoice::Boxlite) => {
+                    #[cfg(feature = "microvm-boxlite")]
+                    {
+                        run_async(crate::lifecycle::create_workspace_with_runtime(
+                            &home,
+                            &backend,
+                            &name,
+                            &source,
+                            from.as_deref(),
+                            image.unwrap_or_else(|| "alpine:3.22".to_owned()),
+                        ))?
+                    }
+                    #[cfg(not(feature = "microvm-boxlite"))]
+                    {
+                        let _ = image;
+                        bail!("BoxLite support is not enabled in this Pando build")
+                    }
+                }
+            };
             println!("{}", workspace_path.display());
         }
         Command::List => {
@@ -318,6 +426,17 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
         }
         Command::Info { name, json } => {
             let (home, _) = prepare_home()?;
+            #[cfg(feature = "microvm-boxlite")]
+            let info = {
+                let (metadata, observed) =
+                    run_async(crate::lifecycle::inspect_workspace_runtime(&home, &name))?;
+                let mut info = workspace_info_from_metadata(state_dir(&home, &name), metadata);
+                if let (Some(runtime), Some(observed)) = (info.runtime.as_mut(), observed) {
+                    runtime.state = Some(observed.status);
+                }
+                info
+            };
+            #[cfg(not(feature = "microvm-boxlite"))]
             let info = workspace_info(&home, &name)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&info)?);
@@ -337,12 +456,78 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                 }
             }
         }
+        Command::Exec { name, arguments } => {
+            #[cfg(feature = "microvm-boxlite")]
+            {
+                let (home, _) = prepare_home()?;
+                let code = run_async(crate::lifecycle::execute_in_workspace(
+                    &home, &name, arguments, false,
+                ))?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+            #[cfg(not(feature = "microvm-boxlite"))]
+            {
+                let _ = (name, arguments);
+                bail!("BoxLite support is not enabled in this Pando build");
+            }
+        }
+        Command::Shell { name } => {
+            #[cfg(feature = "microvm-boxlite")]
+            {
+                let (home, _) = prepare_home()?;
+                let code = run_async(crate::lifecycle::execute_in_workspace(
+                    &home,
+                    &name,
+                    vec!["/bin/sh".to_owned()],
+                    true,
+                ))?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+            #[cfg(not(feature = "microvm-boxlite"))]
+            {
+                let _ = name;
+                bail!("BoxLite support is not enabled in this Pando build");
+            }
+        }
+        Command::Stop { name } => {
+            #[cfg(feature = "microvm-boxlite")]
+            {
+                let (home, _) = prepare_home()?;
+                run_async(crate::lifecycle::stop_workspace_runtime(&home, &name))?;
+            }
+            #[cfg(not(feature = "microvm-boxlite"))]
+            {
+                let _ = name;
+                bail!("BoxLite support is not enabled in this Pando build")
+            }
+        }
         Command::Remove {
             name,
             keep_jj_workspace,
         } => {
+            crate::naming::validate_name(&name)?;
             let (home, backend) = prepare_home()?;
-            destroy_workspace(&home, &backend, &name, keep_jj_workspace)?;
+            let has_runtime = read_metadata(&state_dir(&home, &name))
+                .ok()
+                .and_then(|metadata| metadata.runtime)
+                .is_some();
+            if has_runtime {
+                #[cfg(feature = "microvm-boxlite")]
+                run_async(crate::lifecycle::destroy_workspace_with_runtime(
+                    &home,
+                    &backend,
+                    &name,
+                    keep_jj_workspace,
+                ))?;
+                #[cfg(not(feature = "microvm-boxlite"))]
+                bail!("BoxLite support is not enabled in this Pando build");
+            } else {
+                destroy_workspace(&home, &backend, &name, keep_jj_workspace)?;
+            }
         }
         Command::Completions { shell } => {
             let mut command = Cli::command().name(binary_name);
@@ -353,11 +538,16 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "microvm-boxlite")]
+fn run_async<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::runtime::Runtime::new()?.block_on(future)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         command_name_for_binary, format_age, format_workspace_info_table, format_workspace_list,
-        invoked_binary_name, workspace_info, Cli, Command, ListRow,
+        invoked_binary_name, workspace_info, Cli, Command, ListRow, RuntimeChoice,
     };
     use crate::{
         home::state_dir,
@@ -374,7 +564,7 @@ mod tests {
         let cli = Cli::try_parse_from(["pando", "create", "demo", "--from", "@-"]).unwrap();
 
         match cli.command {
-            Command::Create { name, from } => {
+            Command::Create { name, from, .. } => {
                 assert_eq!(name, "demo");
                 assert_eq!(from.as_deref(), Some("@-"));
             }
@@ -388,6 +578,44 @@ mod tests {
 
         match cli.command {
             Command::Create { from, .. } => assert_eq!(from, None),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_accepts_boxlite_runtime_and_image() {
+        let cli = Cli::try_parse_from([
+            "pando",
+            "create",
+            "demo",
+            "--runtime",
+            "boxlite",
+            "--image",
+            "alpine:3.22",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Create { runtime, image, .. } => {
+                assert_eq!(runtime, Some(RuntimeChoice::Boxlite));
+                assert_eq!(image.as_deref(), Some("alpine:3.22"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_preserves_argument_boundaries() {
+        let cli = Cli::try_parse_from([
+            "pando", "exec", "demo", "--", "printf", "%s", "a b", "$(false)",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Exec { name, arguments } => {
+                assert_eq!(name, "demo");
+                assert_eq!(arguments, ["printf", "%s", "a b", "$(false)"]);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }
