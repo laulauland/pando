@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+manifest="${repo_dir}/tools/workflow-trust-check/Cargo.toml"
+workflow="${repo_dir}/.github/workflows/runtime-experimental.yml"
+
+cargo test --quiet --locked --manifest-path "${manifest}"
+cargo run --quiet --locked --manifest-path "${manifest}" -- "${workflow}"

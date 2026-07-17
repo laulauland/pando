@@ -1,0 +1,135 @@
+name: Experimental runtime artifacts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: 1.97.0
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${{ matrix.target }}"
+          rustup default "${RUST_TOOLCHAIN}"
+      - name: Verify privileged workflow trust gates
+        run: scripts/check-runtime-workflow-trust
+      - name: Build default and experimental runtime artifacts
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}"
+          mkdir -p "target/default-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/pando" "target/default-${{ matrix.target }}/pando"
+          cargo build --locked --profile runtime-experimental --features microvm-boxlite --target "${{ matrix.target }}"
+      - name: Verify artifact modes
+        run: scripts/test-runtime-artifacts "target/default-${{ matrix.target }}/pando" "target/${{ matrix.target }}/runtime-experimental/pando"
+      - name: Verify macOS shim entitlement
+        if: runner.os == 'macOS'
+        run: |
+          find target -path '*/runtime-experimental/build/*/out/runtime/boxlite-shim' -type f > /tmp/pando-shims
+          test "$(wc -l < /tmp/pando-shims | tr -d ' ')" = 1
+          shim="$(sed -n '1p' /tmp/pando-shims)"
+          codesign -d --entitlements :- "${shim}" > /tmp/pando-entitlements.plist 2>/dev/null
+          test "$(plutil -extract com.apple.security.hypervisor raw -o - /tmp/pando-entitlements.plist)" = true
+      - name: Package experimental artifact
+        run: |
+          package="pando-runtime-experimental-${{ matrix.target }}"
+          mkdir -p "${package}/bin"
+          cp "target/${{ matrix.target }}/runtime-experimental/pando" "${package}/bin/pando"
+          cp "target/${{ matrix.target }}/runtime-experimental/pd" "${package}/bin/pd"
+          tar czf "${package}.tar.gz" "${package}"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
+          else
+            shasum -a 256 "${package}.tar.gz" > "${package}.tar.gz.sha256"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pando-runtime-experimental-${{ matrix.target }}
+          path: pando-runtime-experimental-${{ matrix.target }}.tar.gz*
+
+  live-linux-kernel-overlay:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected
+    needs: build
+    environment: pando-runtime-qualification
+    permissions:
+      actions: read
+      contents: read
+    runs-on: [self-hosted, Linux, X64, pando-kvm-root]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pando-runtime-experimental-x86_64-unknown-linux-gnu
+      - name: Install pinned Rust harness toolchain
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+      - name: Verify and unpack exact artifact
+        run: |
+          sha256sum -c pando-runtime-experimental-x86_64-unknown-linux-gnu.tar.gz.sha256
+          tar xzf pando-runtime-experimental-x86_64-unknown-linux-gnu.tar.gz
+      - run: test -r /dev/kvm && test -w /dev/kvm && test "$(id -u)" -eq 0
+      - run: scripts/test-boxlite-live "$PWD/pando-runtime-experimental-x86_64-unknown-linux-gnu/bin/pando"
+
+  live-linux-fuse-overlay:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected
+    needs: build
+    environment: pando-runtime-qualification
+    permissions:
+      actions: read
+      contents: read
+    runs-on: [self-hosted, Linux, X64, pando-kvm-rootless]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pando-runtime-experimental-x86_64-unknown-linux-gnu
+      - name: Install pinned Rust harness toolchain
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+      - name: Verify and unpack exact artifact
+        run: |
+          sha256sum -c pando-runtime-experimental-x86_64-unknown-linux-gnu.tar.gz.sha256
+          tar xzf pando-runtime-experimental-x86_64-unknown-linux-gnu.tar.gz
+      - run: test -r /dev/kvm && test -w /dev/kvm && test "$(id -u)" -ne 0
+      - run: scripts/test-boxlite-live "$PWD/pando-runtime-experimental-x86_64-unknown-linux-gnu/bin/pando"
+
+  live-macos-hvf:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected
+    needs: build
+    environment: pando-runtime-qualification
+    permissions:
+      actions: read
+      contents: read
+    runs-on: [self-hosted, macOS, ARM64, pando-hvf]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pando-runtime-experimental-aarch64-apple-darwin
+      - name: Install pinned Rust harness toolchain
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+      - name: Verify and unpack exact artifact
+        run: |
+          shasum -a 256 -c pando-runtime-experimental-aarch64-apple-darwin.tar.gz.sha256
+          tar xzf pando-runtime-experimental-aarch64-apple-darwin.tar.gz
+      - run: scripts/test-boxlite-live "$PWD/pando-runtime-experimental-aarch64-apple-darwin/bin/pando"

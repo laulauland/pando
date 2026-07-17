@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 2 ]; then
+  echo "usage: $0 DEFAULT_PANDO RUNTIME_PANDO" >&2
+  exit 2
+fi
+
+default_pando="$1"
+runtime_pando="$2"
+test_root="$(mktemp -d /tmp/pando-artifact-smoke.XXXXXX)"
+trap 'rm -rf "${test_root}"' EXIT
+
+"${default_pando}" --help >/dev/null
+"${runtime_pando}" --help >/dev/null
+
+if PANDO_HOME="${test_root}/default-home" "${default_pando}" create smoke --runtime boxlite \
+  --image alpine:3.22 >"${test_root}/stdout" 2>"${test_root}/stderr"; then
+  echo "default artifact unexpectedly enabled BoxLite" >&2
+  exit 1
+fi
+grep -q "BoxLite support is not enabled" "${test_root}/stderr"
+
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64|Linux:amd64)
+    "${runtime_pando}" create --help | grep -q -- "--allow-unqualified-seccomp"
+    ;;
+  Darwin:arm64|Darwin:aarch64)
+    if "${runtime_pando}" create --help | grep -q -- "--allow-unqualified-seccomp"; then
+      echo "macOS runtime artifact exposed the Linux-only seccomp override" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "unsupported runtime artifact smoke platform: $(uname -s) $(uname -m)" >&2
+    exit 1
+    ;;
+esac

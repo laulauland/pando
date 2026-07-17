@@ -25,25 +25,14 @@ fn non_jj_and_native_jj_workspaces_run_tools_and_preserve_isolation() {
     fs::create_dir_all(&source).unwrap();
     fs::write(source.join("original.txt"), "canonical").unwrap();
     install_fs_probe(&source);
+    write_qualified_runtime_config(&home, "alpine:3.22", 1, 256);
     let _cleanup = WorkspaceCleanup {
         home: home.clone(),
         source: source.clone(),
     };
 
     let mut create_demo = command(&home, &source);
-    create_demo.args([
-        "create",
-        "demo",
-        "--runtime",
-        "boxlite",
-        "--image",
-        "alpine:3.22",
-        "--cpus",
-        "1",
-        "--memory-mib",
-        "256",
-    ]);
-    common::add_qualified_runtime_cli_args(&mut create_demo);
+    create_demo.args(["create", "demo"]);
     create_demo.assert_success();
     let limits = command(&home, &source)
         .args([
@@ -172,7 +161,7 @@ fn non_jj_and_native_jj_workspaces_run_tools_and_preserve_isolation() {
     assert_eq!(info["runtime"]["cpu_count"], 1);
     assert_eq!(info["runtime"]["memory_mib"], 256);
     assert_eq!(info["runtime"]["network"], "disabled");
-    assert_eq!(info["runtime"]["seccomp"], "allow-unqualified-provider");
+    assert_eq!(info["runtime"]["seccomp"], common::expected_seccomp_json());
     assert_eq!(info["runtime"]["state"], "running");
     let provider_id = info["runtime"]["provider_id"].as_str().unwrap().to_owned();
     assert!(provider_id.len() > 4);
@@ -416,7 +405,9 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
             "--",
             "sh",
             "-c",
-            &format!("{jj_command} log -r '{qualified_change}' --no-graph -T description"),
+            &format!(
+                "{jj_command} workspace update-stale && {jj_command} log -r '{qualified_change}' --no-graph -T description"
+            ),
         ])
         .assert_success();
     assert_eq!(restarted.stdout, b"concurrent guest write\n");
@@ -728,6 +719,7 @@ int main(int argc, char **argv) {
         "could not build static filesystem probe: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    fs::set_permissions(source.join("fs-probe"), fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1134,7 +1126,9 @@ fn run_in_terminal(command: &mut Command, input: &[u8], send_interrupt: bool) ->
 }
 
 fn command(home: &Path, current_dir: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pando"));
+    let binary =
+        std::env::var_os("PANDO_TEST_BINARY").unwrap_or_else(|| env!("CARGO_BIN_EXE_pando").into());
+    let mut command = Command::new(binary);
     let home_argument = if home.parent() == current_dir.parent() {
         Path::new("..").join(home.file_name().unwrap())
     } else {
@@ -1144,6 +1138,16 @@ fn command(home: &Path, current_dir: &Path) -> Command {
         .env("PANDO_HOME", home_argument)
         .current_dir(current_dir);
     command
+}
+
+fn write_qualified_runtime_config(home: &Path, image: &str, cpus: u8, memory_mib: u32) {
+    fs::create_dir_all(home).unwrap();
+    let mut config = format!(
+        "[runtime]\nruntime = \"boxlite\"\nimage = {image:?}\ncpus = {cpus}\nmemory_mib = {memory_mib}\n"
+    );
+    #[cfg(target_os = "linux")]
+    config.push_str("allow_unqualified_seccomp = true\n");
+    fs::write(home.join("config.toml"), config).unwrap();
 }
 
 trait CommandResult {

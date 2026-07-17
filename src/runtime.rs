@@ -6,6 +6,80 @@ pub const GUEST_WORKSPACE_PATH: &str = "/workspace";
 pub const DEFAULT_CPU_COUNT: u8 = 2;
 pub const DEFAULT_MEMORY_MIB: u32 = 512;
 
+pub fn validate_runtime_platform() -> Result<()> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        validate_linux_kvm_at(std::path::Path::new("/dev/kvm"), |file| {
+            use std::os::fd::AsRawFd;
+            // KVM_GET_API_VERSION is an argument-free ioctl from linux/kvm.h.
+            let version = unsafe { libc::ioctl(file.as_raw_fd(), 0xAE00) };
+            if version < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(version)
+            }
+        })
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        validate_macos_hvf_with(|| {
+            let output = std::process::Command::new("/usr/sbin/sysctl")
+                .args(["-n", "kern.hv_support"])
+                .output()?;
+            if !output.status.success() {
+                return Err(std::io::Error::other(
+                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                ));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        })
+    }
+    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+    anyhow::bail!("BoxLite runtimes are unsupported on Intel Macs; use Apple Silicon with Hypervisor.framework");
+    #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
+    anyhow::bail!("BoxLite runtimes are currently qualified only on Linux x86_64 with KVM");
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    anyhow::bail!(
+        "BoxLite runtimes are supported only on Linux x86_64/KVM and Apple Silicon macOS/HVF"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn validate_linux_kvm_at(
+    path: &std::path::Path,
+    get_api_version: impl FnOnce(&std::fs::File) -> std::io::Result<i32>,
+) -> Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| anyhow::anyhow!(
+            "BoxLite requires readable and writable /dev/kvm access on Linux x86_64 ({error}); enable hardware virtualization and grant this user KVM access"
+        ))?;
+    let version = get_api_version(&file).map_err(|error| anyhow::anyhow!(
+        "BoxLite could not query KVM_GET_API_VERSION on /dev/kvm ({error}); verify that hardware virtualization and the KVM kernel modules are available"
+    ))?;
+    if version != 12 {
+        anyhow::bail!(
+            "BoxLite requires KVM API version 12, but /dev/kvm reported {version}; update or enable a compatible KVM kernel module"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn validate_macos_hvf_with(query: impl FnOnce() -> std::io::Result<String>) -> Result<()> {
+    let support = query().map_err(|error| anyhow::anyhow!(
+        "BoxLite could not query kern.hv_support ({error}); Hypervisor.framework availability is required"
+    ))?;
+    if support != "1" {
+        anyhow::bail!(
+            "BoxLite requires Hypervisor.framework support, but kern.hv_support reported {support:?}"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RuntimeNetworkPolicy {
@@ -1559,5 +1633,33 @@ mod policy_tests {
         }
         .validate()
         .is_ok());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn missing_kvm_has_an_actionable_platform_diagnostic() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = super::validate_linux_kvm_at(&directory.path().join("missing-kvm"), |_| Ok(12))
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("/dev/kvm"));
+        assert!(message.contains("hardware virtualization"));
+        assert!(message.contains("KVM access"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn incompatible_kvm_api_has_an_actionable_diagnostic() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let error = super::validate_linux_kvm_at(file.path(), |_| Ok(11)).unwrap_err();
+        assert!(error.to_string().contains("requires KVM API version 12"));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn unavailable_hvf_has_an_actionable_diagnostic() {
+        let error = super::validate_macos_hvf_with(|| Ok("0".to_owned())).unwrap_err();
+        assert!(error.to_string().contains("Hypervisor.framework"));
+        assert!(error.to_string().contains("kern.hv_support"));
     }
 }

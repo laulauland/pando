@@ -2,6 +2,7 @@
 use crate::lifecycle::{create_workspace, destroy_workspace, list_workspaces};
 use crate::{
     backend::PlatformCowBackend,
+    config::{read_config, ConfiguredRuntime, RuntimeDefaults},
     home::{legacy_pando_home, pando_home, state_dir},
     metadata::JjMetadata,
     migration::migrate_legacy_home_if_needed,
@@ -45,18 +46,21 @@ enum Command {
         /// Run the workspace in an optional execution environment.
         #[arg(long, value_enum)]
         runtime: Option<RuntimeChoice>,
+        /// Create only the host workspace, overriding a configured runtime default.
+        #[arg(long, conflicts_with = "runtime")]
+        no_runtime: bool,
         /// OCI image for the execution environment.
-        #[arg(long, requires = "runtime")]
+        #[arg(long)]
         image: Option<String>,
         /// Virtual CPU count for the execution environment.
-        #[arg(long, requires = "runtime", default_value_t = crate::runtime::DEFAULT_CPU_COUNT)]
-        cpus: u8,
+        #[arg(long)]
+        cpus: Option<u8>,
         /// Guest memory limit in MiB.
-        #[arg(long, requires = "runtime", default_value_t = crate::runtime::DEFAULT_MEMORY_MIB)]
-        memory_mib: u32,
+        #[arg(long)]
+        memory_mib: Option<u32>,
         /// Explicitly accept BoxLite 0.9.7's unqualified Linux seccomp incompatibility.
         #[cfg(target_os = "linux")]
-        #[arg(long, requires = "runtime")]
+        #[arg(long)]
         allow_unqualified_seccomp: bool,
     },
     /// List Pando workspaces.
@@ -115,6 +119,78 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum RuntimeChoice {
     Boxlite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedRuntimeDefaults {
+    runtime: Option<RuntimeChoice>,
+    image: Option<String>,
+    cpus: u8,
+    memory_mib: u32,
+    allow_unqualified_seccomp: bool,
+}
+
+fn resolve_runtime_defaults(
+    runtime: Option<RuntimeChoice>,
+    no_runtime: bool,
+    image: Option<String>,
+    cpus: Option<u8>,
+    memory_mib: Option<u32>,
+    allow_unqualified_seccomp: bool,
+    configured: RuntimeDefaults,
+) -> Result<ResolvedRuntimeDefaults> {
+    let configured_runtime = (!no_runtime).then_some(configured);
+    let runtime = runtime.or(configured_runtime.as_ref().and_then(|configured| {
+        configured.runtime.map(|runtime| match runtime {
+            ConfiguredRuntime::Boxlite => RuntimeChoice::Boxlite,
+        })
+    }));
+    let image = image.or_else(|| {
+        configured_runtime
+            .as_ref()
+            .and_then(|configured| configured.image.clone())
+    });
+    let cpus = cpus
+        .or_else(|| {
+            configured_runtime
+                .as_ref()
+                .and_then(|configured| configured.cpus)
+        })
+        .unwrap_or(crate::runtime::DEFAULT_CPU_COUNT);
+    let memory_mib = memory_mib
+        .or_else(|| {
+            configured_runtime
+                .as_ref()
+                .and_then(|configured| configured.memory_mib)
+        })
+        .unwrap_or(crate::runtime::DEFAULT_MEMORY_MIB);
+    let allow_unqualified_seccomp = allow_unqualified_seccomp
+        || configured_runtime
+            .as_ref()
+            .and_then(|configured| configured.allow_unqualified_seccomp)
+            .unwrap_or(false);
+
+    if runtime.is_none()
+        && (image.is_some()
+            || cpus != crate::runtime::DEFAULT_CPU_COUNT
+            || memory_mib != crate::runtime::DEFAULT_MEMORY_MIB
+            || allow_unqualified_seccomp)
+    {
+        anyhow::bail!("runtime settings require --runtime or runtime.runtime in config.toml");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if allow_unqualified_seccomp {
+        anyhow::bail!("allow_unqualified_seccomp is supported only on Linux");
+    }
+
+    Ok(ResolvedRuntimeDefaults {
+        runtime,
+        image,
+        cpus,
+        memory_mib,
+        allow_unqualified_seccomp,
+    })
 }
 
 pub fn run() -> Result<()> {
@@ -511,6 +587,7 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
             name,
             from,
             runtime,
+            no_runtime,
             image,
             cpus,
             memory_mib,
@@ -519,9 +596,20 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
         } => {
             #[cfg(not(target_os = "linux"))]
             let allow_unqualified_seccomp = false;
+            let home = pando_home()?;
+            let configured = read_config(&home)?.runtime;
+            let resolved = resolve_runtime_defaults(
+                runtime,
+                no_runtime,
+                image,
+                cpus,
+                memory_mib,
+                allow_unqualified_seccomp,
+                configured,
+            )?;
             let (home, backend) = prepare_home()?;
             let source = env::current_dir()?;
-            let workspace_path = match runtime {
+            let workspace_path = match resolved.runtime {
                 None => {
                     #[cfg(feature = "microvm-boxlite")]
                     {
@@ -542,10 +630,10 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                     #[cfg(feature = "microvm-boxlite")]
                     {
                         let policy = crate::runtime::RuntimePolicy {
-                            cpu_count: cpus,
-                            memory_mib,
+                            cpu_count: resolved.cpus,
+                            memory_mib: resolved.memory_mib,
                             network: crate::runtime::RuntimeNetworkPolicy::Disabled,
-                            seccomp: if allow_unqualified_seccomp {
+                            seccomp: if resolved.allow_unqualified_seccomp {
                                 crate::runtime::RuntimeSeccompPolicy::AllowUnqualifiedProvider
                             } else {
                                 crate::runtime::RuntimeSeccompPolicy::Required
@@ -557,13 +645,13 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                             &name,
                             &source,
                             from.as_deref(),
-                            image.unwrap_or_else(|| "alpine:3.22".to_owned()),
+                            resolved.image.unwrap_or_else(|| "alpine:3.22".to_owned()),
                             policy,
                         ))?
                     }
                     #[cfg(not(feature = "microvm-boxlite"))]
                     {
-                        let _ = (image, cpus, memory_mib, allow_unqualified_seccomp);
+                        let _ = resolved;
                         bail!("BoxLite support is not enabled in this Pando build")
                     }
                 }
@@ -742,9 +830,11 @@ fn run_async<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<
 mod tests {
     use super::{
         command_name_for_binary, format_age, format_workspace_info_table, format_workspace_list,
-        invoked_binary_name, workspace_info, Cli, Command, ListRow, RuntimeChoice,
+        invoked_binary_name, resolve_runtime_defaults, workspace_info, Cli, Command, ListRow,
+        RuntimeChoice,
     };
     use crate::{
+        config::{ConfiguredRuntime, RuntimeDefaults},
         home::state_dir,
         metadata::{write_metadata, JjMetadata, Metadata},
     };
@@ -753,6 +843,94 @@ mod tests {
     use clap_complete::{generate, Shell};
     use serde_json::Value;
     use std::{ffi::OsStr, fs};
+
+    #[test]
+    fn configured_runtime_defaults_make_create_concise() {
+        let resolved = resolve_runtime_defaults(
+            None,
+            false,
+            None,
+            None,
+            None,
+            false,
+            RuntimeDefaults {
+                runtime: Some(ConfiguredRuntime::Boxlite),
+                image: Some("debian:stable".to_owned()),
+                cpus: Some(4),
+                memory_mib: Some(1024),
+                allow_unqualified_seccomp: Some(true),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.runtime, Some(RuntimeChoice::Boxlite));
+        assert_eq!(resolved.image.as_deref(), Some("debian:stable"));
+        assert_eq!(resolved.cpus, 4);
+        assert_eq!(resolved.memory_mib, 1024);
+        assert!(resolved.allow_unqualified_seccomp);
+    }
+
+    #[test]
+    fn command_line_runtime_settings_override_config() {
+        let resolved = resolve_runtime_defaults(
+            Some(RuntimeChoice::Boxlite),
+            false,
+            Some("alpine:edge".to_owned()),
+            Some(8),
+            Some(2048),
+            false,
+            RuntimeDefaults {
+                runtime: Some(ConfiguredRuntime::Boxlite),
+                image: Some("debian:stable".to_owned()),
+                cpus: Some(4),
+                memory_mib: Some(1024),
+                allow_unqualified_seccomp: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.image.as_deref(), Some("alpine:edge"));
+        assert_eq!(resolved.cpus, 8);
+        assert_eq!(resolved.memory_mib, 2048);
+    }
+
+    #[test]
+    fn configured_runtime_settings_do_not_implicitly_enable_a_runtime() {
+        let error = resolve_runtime_defaults(
+            None,
+            false,
+            None,
+            None,
+            None,
+            false,
+            RuntimeDefaults {
+                image: Some("debian:stable".to_owned()),
+                ..RuntimeDefaults::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("runtime.runtime"));
+    }
+
+    #[test]
+    fn no_runtime_overrides_configured_runtime() {
+        let resolved = resolve_runtime_defaults(
+            None,
+            true,
+            None,
+            None,
+            None,
+            false,
+            RuntimeDefaults {
+                runtime: Some(ConfiguredRuntime::Boxlite),
+                ..RuntimeDefaults::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.runtime, None);
+    }
 
     #[cfg(feature = "microvm-boxlite")]
     #[test]

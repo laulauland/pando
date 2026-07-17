@@ -39,3 +39,9 @@ toml = "0.8"
 
 [dev-dependencies]
 proptest = "1.5"
+
+# Unpublished qualification artifacts retain lifecycle crash injection so the
+# exact packaged executable can run the interrupted-create/remove matrix.
+[profile.runtime-experimental]
+inherits = "release"
+debug-assertions = true

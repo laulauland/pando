@@ -313,6 +313,7 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
 
     validate_name(name)?;
     policy.validate()?;
+    crate::runtime::validate_runtime_platform()?;
     let _lock = acquire_runtime_lock(home).await?;
     ensure_home(home)?;
     let runtime = BoxLiteRuntimeBackend::new(home)?;

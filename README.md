@@ -6,7 +6,7 @@
 
 ## Usage
 
-    pando create <name> [--from <revset>] [--runtime boxlite] [--image <image>] [--cpus <count>] [--memory-mib <MiB>]
+    pando create <name> [--from <revset>] [--runtime boxlite | --no-runtime] [--image <image>] [--cpus <count>] [--memory-mib <MiB>]
     pando exec <name> -- <command> [args...]
     pando shell <name>
     pando stop <name>
@@ -32,6 +32,26 @@ Build with `--features microvm-boxlite` to attach an optional BoxLite micro-VM t
     pando stop feature-x
     pando remove feature-x
 
+Repeated runtime flags can live in `$PANDO_HOME/config.toml` (normally
+`~/.pando/config.toml`):
+
+```toml
+[runtime]
+runtime = "boxlite"
+image = "alpine:3.22"
+cpus = 2
+memory_mib = 512
+allow_unqualified_seccomp = true # Linux only; explicit security acknowledgement
+```
+
+With that configuration, `pando create feature-x` creates both the workspace and
+its VM; use `pando create feature-x --no-runtime` for a host-only exception.
+Command-line values override configured values. Setting image or resource
+defaults does not enable a VM by itself: `runtime = "boxlite"` or an explicit
+`--runtime boxlite` is required. Unknown configuration keys and invalid values fail
+before workspace mutation. On macOS, omit `allow_unqualified_seccomp`; the option is
+specific to BoxLite 0.9.7's Linux seccomp incompatibility.
+
 `exec` preserves argument boundaries and returns the guest command's exit status. `shell` opens an interactive `/bin/sh`; both commands restart a stopped runtime. Runtime workspaces are mounted read-write at `/workspace`, which is also the guest command's working directory. `info` reports the configured image, provider ID, and observed runtime state. Removing a runtime workspace stops and removes its VM before deleting the copy-on-write workspace.
 
 Runtime creation validates CPU (1–64) and memory (128–262144 MiB) limits before workspace mutation; defaults are 2 CPUs and 512 MiB. Networking is always disabled in this release: BoxLite supplies only loopback and an unconnected dummy interface, with no default route. There is intentionally no network-enable flag yet. Guest root-disk state and `/workspace` persist across `stop`, while guest processes do not.
@@ -39,6 +59,8 @@ Runtime creation validates CPU (1–64) and memory (128–262144 MiB) limits bef
 On Linux, Pando fails closed by default because BoxLite 0.9.7's bundled seccomp profile terminates the qualified libkrun path with `SIGSYS`. `--allow-unqualified-seccomp` explicitly acknowledges running with that provider filter disabled; VM isolation, the BoxLite jailer, sealed mounts, resource limits, and disabled networking remain active, but this is not equivalent to a qualified seccomp sandbox. macOS uses Hypervisor.framework and does not expose this Linux-only override.
 
 BoxLite 0.9.7's Linux virtiofs mount preserves atomic exclusive creation, directories, rename, mmap visibility, and the filesystem primitives used by `jj`. It does **not** propagate BSD `flock` or POSIX `fcntl` advisory locks between host and guest: software sharing `/workspace` across that boundary must use atomic lock files/directories or avoid simultaneous access. Pando's live suite deliberately verifies both this limitation and concurrent host/guest `jj` integrity.
+
+Runtime-enabled binaries are currently experimental CI artifacts, not GitHub release, Homebrew, install-script, or mise artifacts. The [runtime packaging record](docs/runtime-packaging.md) documents platform status, artifact naming, measured size/build cost, embedded native assets, licensing and reproducibility blockers, and the future external executor seam.
 
 For native `jj` workspaces, Pando also mounts only the canonical `.jj/repo` store read-write at the guest path selected by the workspace's unchanged relative `.jj/repo` pointer. The canonical working copy is not mounted. Pando validates that pointer against the recorded canonical store before creating the VM; absolute, malformed, mismatched, overlapping, and externally backed store layouts fail closed. In particular, this stage supports self-contained/non-colocated jj repositories; a colocated Git backend depends on the canonical `.git` outside `.jj/repo` and is rejected rather than exposing it.
 

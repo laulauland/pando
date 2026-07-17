@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod cli;
+pub mod config;
 pub mod home;
 pub mod jj;
 pub mod lifecycle;

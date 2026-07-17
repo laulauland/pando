@@ -30,6 +30,19 @@ pub fn add_qualified_runtime_cli_args(command: &mut Command) {
     panic!("BoxLite live qualification supports only Linux/KVM and macOS/HVF");
 }
 
+pub fn expected_seccomp_json() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "allow-unqualified-provider"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "required"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    panic!("BoxLite live qualification supports only Linux/KVM and macOS/HVF");
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -56,5 +69,14 @@ mod tests {
         assert_eq!(args, ["--allow-unqualified-seccomp"]);
         #[cfg(target_os = "macos")]
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn metadata_expectation_matches_platform_qualification() {
+        let expected = super::expected_seccomp_json();
+        #[cfg(target_os = "linux")]
+        assert_eq!(expected, "allow-unqualified-provider");
+        #[cfg(target_os = "macos")]
+        assert_eq!(expected, "required");
     }
 }

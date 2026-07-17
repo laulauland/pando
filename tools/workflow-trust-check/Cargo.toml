@@ -1,0 +1,9 @@
+[package]
+name = "workflow-trust-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "=1.0.102"
+serde_yaml = "=0.9.34"
