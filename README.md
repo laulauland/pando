@@ -74,7 +74,7 @@ Or with the release installer:
 
 Set `BIN_DIR` to choose the install directory, or `PANDO_VERSION` to install a specific release:
 
-    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.3.0 bash
+    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.3.1 bash
 
 The installer also writes bash, zsh, and fish completions for both `pando` and `pd` into user completion directories by default. Set `INSTALL_COMPLETIONS=0` to skip them, or override `BASH_COMPLETION_DIR`, `ZSH_COMPLETION_DIR`, or `FISH_COMPLETION_DIR`.
 

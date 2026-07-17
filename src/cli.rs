@@ -20,10 +20,7 @@ use std::{
 };
 
 #[derive(Debug, Parser)]
-#[command(
-    disable_version_flag = true,
-    about = "Create and manage isolated Pando workspaces"
-)]
+#[command(version, about = "Create and manage isolated Pando workspaces")]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -575,14 +572,14 @@ mod tests {
     }
 
     #[test]
-    fn help_uses_requested_binary_name_and_avoids_version_and_implementation_details() {
+    fn help_uses_requested_binary_name_and_avoids_implementation_details() {
         let mut command = Cli::command().name("pd");
         let help = command.render_help().to_string();
 
         assert!(help.contains("Usage: pd"));
         assert!(!help.contains("Usage: pando"));
 
-        assert!(!help.contains("--version"));
+        assert!(help.contains("--version"));
         assert!(!help.contains("implementation"));
         assert!(!help.contains("native"));
         assert!(help.contains("remove"));

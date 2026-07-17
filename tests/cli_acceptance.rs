@@ -28,6 +28,23 @@ fn pando_and_pd_help_use_invoked_binary_names() {
 }
 
 #[test]
+fn pando_and_pd_version_use_invoked_binary_names() {
+    for (binary, name) in [
+        (env!("CARGO_BIN_EXE_pando"), "pando"),
+        (env!("CARGO_BIN_EXE_pd"), "pd"),
+    ] {
+        let output = Command::new(binary).arg("--version").output().unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{name} {}\n", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
 fn pando_and_pd_completions_use_invoked_binary_names() {
     let pando = Command::new(env!("CARGO_BIN_EXE_pando"))
         .args(["completions", "bash"])
