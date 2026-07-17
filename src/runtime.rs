@@ -3,6 +3,65 @@ use serde::{Deserialize, Serialize};
 use std::{future::Future, path::PathBuf};
 
 pub const GUEST_WORKSPACE_PATH: &str = "/workspace";
+pub const DEFAULT_CPU_COUNT: u8 = 2;
+pub const DEFAULT_MEMORY_MIB: u32 = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeNetworkPolicy {
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeSeccompPolicy {
+    Required,
+    AllowUnqualifiedProvider,
+    /// Metadata written before Pando recorded the provider's seccomp posture.
+    LegacyUnqualifiedProvider,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePolicy {
+    pub cpu_count: u8,
+    pub memory_mib: u32,
+    pub network: RuntimeNetworkPolicy,
+    pub seccomp: RuntimeSeccompPolicy,
+}
+
+impl Default for RuntimePolicy {
+    fn default() -> Self {
+        Self {
+            cpu_count: DEFAULT_CPU_COUNT,
+            memory_mib: DEFAULT_MEMORY_MIB,
+            network: RuntimeNetworkPolicy::Disabled,
+            seccomp: RuntimeSeccompPolicy::Required,
+        }
+    }
+}
+
+impl RuntimePolicy {
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=64).contains(&self.cpu_count) {
+            anyhow::bail!("runtime CPU count must be between 1 and 64");
+        }
+        if !(128..=262_144).contains(&self.memory_mib) {
+            anyhow::bail!("runtime memory must be between 128 and 262144 MiB");
+        }
+        #[cfg(target_os = "linux")]
+        if self.seccomp == RuntimeSeccompPolicy::Required {
+            anyhow::bail!("BoxLite 0.9.7 seccomp is incompatible with Pando's qualified Linux/libkrun path; refusing to weaken the sandbox (pass --allow-unqualified-seccomp only for an explicitly accepted provider risk)");
+        }
+        if self.seccomp == RuntimeSeccompPolicy::LegacyUnqualifiedProvider {
+            anyhow::bail!("legacy runtime security posture cannot be selected for a new runtime");
+        }
+        #[cfg(not(target_os = "linux"))]
+        if self.seccomp == RuntimeSeccompPolicy::AllowUnqualifiedProvider {
+            anyhow::bail!("--allow-unqualified-seccomp is only valid on Linux");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -23,6 +82,7 @@ pub struct RuntimeSpec {
     image: String,
     workspace_path: Option<PathBuf>,
     name: Option<String>,
+    policy: RuntimePolicy,
     #[cfg(feature = "microvm-boxlite")]
     jj_store: Option<crate::jj::JjRuntimeMount>,
 }
@@ -33,6 +93,7 @@ impl RuntimeSpec {
             image: image.into(),
             workspace_path: None,
             name: None,
+            policy: RuntimePolicy::default(),
             #[cfg(feature = "microvm-boxlite")]
             jj_store: None,
         }
@@ -46,6 +107,15 @@ impl RuntimeSpec {
     pub fn with_name(mut self, name: String) -> Self {
         self.name = Some(name);
         self
+    }
+
+    pub fn with_policy(mut self, policy: RuntimePolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn policy(&self) -> RuntimePolicy {
+        self.policy
     }
 
     pub fn image(&self) -> &str {
@@ -141,9 +211,6 @@ mod boxlite_backend {
         path::{Path, PathBuf},
     };
 
-    const CPU_COUNT: u8 = 2;
-    const MEMORY_MIB: u32 = 512;
-
     pub struct BoxLiteRuntimeBackend {
         runtime: BoxliteRuntime,
         runtime_home: PathBuf,
@@ -204,6 +271,7 @@ mod boxlite_backend {
 
     impl RuntimeBackend for BoxLiteRuntimeBackend {
         async fn create(&self, spec: RuntimeSpec) -> Result<RuntimeIdentity> {
+            spec.policy.validate()?;
             if spec.jj_store.is_some() && spec.workspace_path.is_none() {
                 bail!("invalid runtime topology: jj store requires /workspace");
             }
@@ -211,7 +279,10 @@ mod boxlite_backend {
             // BoxLite 0.9.7's bundled filter kills libkrun with SIGSYS on gondor's
             // Linux 7.1 kernel. Keep the rest of its jailer enabled while the
             // syscall profile is qualified in stage 5.
-            advanced.security.seccomp_enabled = false;
+            #[cfg(target_os = "linux")]
+            {
+                advanced.security.seccomp_enabled = false;
+            }
             let mut volumes: Vec<VolumeSpec> = spec
                 .workspace_path
                 .map(|path| -> Result<VolumeSpec> {
@@ -242,8 +313,8 @@ mod boxlite_backend {
                 });
             }
             let options = BoxOptions {
-                cpus: Some(CPU_COUNT),
-                memory_mib: Some(MEMORY_MIB),
+                cpus: Some(spec.policy.cpu_count),
+                memory_mib: Some(spec.policy.memory_mib),
                 rootfs: RootfsSpec::Image(spec.image),
                 network: NetworkSpec::Disabled,
                 auto_remove: false,
@@ -1457,3 +1528,36 @@ mod boxlite_backend {
 
 #[cfg(feature = "microvm-boxlite")]
 pub use boxlite_backend::BoxLiteRuntimeBackend;
+
+#[cfg(test)]
+mod policy_tests {
+    use super::{RuntimePolicy, RuntimeSeccompPolicy};
+
+    #[test]
+    fn resource_limits_reject_out_of_range_values() {
+        assert!(RuntimePolicy {
+            cpu_count: 0,
+            ..RuntimePolicy::default()
+        }
+        .validate()
+        .is_err());
+        assert!(RuntimePolicy {
+            memory_mib: 127,
+            ..RuntimePolicy::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_requires_explicit_boxlite_seccomp_qualification_override() {
+        assert!(RuntimePolicy::default().validate().is_err());
+        assert!(RuntimePolicy {
+            seccomp: RuntimeSeccompPolicy::AllowUnqualifiedProvider,
+            ..RuntimePolicy::default()
+        }
+        .validate()
+        .is_ok());
+    }
+}

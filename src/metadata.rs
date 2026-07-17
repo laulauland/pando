@@ -1,4 +1,4 @@
-use crate::runtime::RuntimeIdentity;
+use crate::runtime::{RuntimeIdentity, RuntimePolicy};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,15 @@ pub struct Metadata {
 pub struct RuntimeMetadata {
     pub identity: RuntimeIdentity,
     pub image: String,
+    #[serde(default = "legacy_runtime_policy")]
+    pub policy: RuntimePolicy,
+}
+
+fn legacy_runtime_policy() -> RuntimePolicy {
+    RuntimePolicy {
+        seccomp: crate::runtime::RuntimeSeccompPolicy::LegacyUnqualifiedProvider,
+        ..RuntimePolicy::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,6 +603,30 @@ workspace_path = "/workspace"
     }
 
     #[test]
+    fn legacy_runtime_metadata_never_claims_seccomp_was_required() {
+        let state_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            metadata_path(state_dir.path()),
+            r#"name = "demo"
+created_at = "2025-01-02T03:04:05Z"
+canonical_root = "/source"
+workspace_path = "/workspace"
+
+[runtime]
+identity = "box-123"
+image = "alpine:3.22"
+"#,
+        )
+        .unwrap();
+
+        let read = read_metadata(state_dir.path()).unwrap();
+        assert_eq!(
+            read.runtime.unwrap().policy.seccomp,
+            crate::runtime::RuntimeSeccompPolicy::LegacyUnqualifiedProvider
+        );
+    }
+
+    #[test]
     fn round_trips_runtime_identity_and_image() {
         let state_dir = tempfile::tempdir().unwrap();
         let mut metadata = Metadata::new(
@@ -604,6 +637,7 @@ workspace_path = "/workspace"
         metadata.runtime = Some(RuntimeMetadata {
             identity: RuntimeIdentity::new("box-123"),
             image: "alpine:3.22".to_owned(),
+            policy: Default::default(),
         });
 
         write_metadata(state_dir.path(), &metadata).unwrap();

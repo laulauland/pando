@@ -48,6 +48,16 @@ enum Command {
         /// OCI image for the execution environment.
         #[arg(long, requires = "runtime")]
         image: Option<String>,
+        /// Virtual CPU count for the execution environment.
+        #[arg(long, requires = "runtime", default_value_t = crate::runtime::DEFAULT_CPU_COUNT)]
+        cpus: u8,
+        /// Guest memory limit in MiB.
+        #[arg(long, requires = "runtime", default_value_t = crate::runtime::DEFAULT_MEMORY_MIB)]
+        memory_mib: u32,
+        /// Explicitly accept BoxLite 0.9.7's unqualified Linux seccomp incompatibility.
+        #[cfg(target_os = "linux")]
+        #[arg(long, requires = "runtime")]
+        allow_unqualified_seccomp: bool,
     },
     /// List Pando workspaces.
     List,
@@ -240,8 +250,19 @@ struct WorkspaceRuntimeInfo {
     kind: &'static str,
     provider_id: crate::runtime::RuntimeIdentity,
     image: String,
+    cpu_count: u8,
+    memory_mib: u32,
+    network: crate::runtime::RuntimeNetworkPolicy,
+    seccomp: crate::runtime::RuntimeSeccompPolicy,
+    advisory_locks: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<crate::runtime::RuntimeStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_cpu_count: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_memory_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    drift: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -277,7 +298,19 @@ fn workspace_info_from_metadata(
             kind: "boxlite",
             provider_id: runtime.identity,
             image: runtime.image,
+            cpu_count: runtime.policy.cpu_count,
+            memory_mib: runtime.policy.memory_mib,
+            network: runtime.policy.network,
+            seccomp: runtime.policy.seccomp,
+            advisory_locks: if cfg!(target_os = "linux") {
+                "host-guest-unsupported"
+            } else {
+                "not-qualified"
+            },
             state: None,
+            observed_cpu_count: None,
+            observed_memory_mib: None,
+            drift: Vec::new(),
         });
     WorkspaceInfo {
         name: metadata.name,
@@ -289,6 +322,39 @@ fn workspace_info_from_metadata(
             .jj
             .map(|jj| workspace_jj_info(jj, &metadata.canonical_root)),
         runtime,
+    }
+}
+
+#[cfg(feature = "microvm-boxlite")]
+fn reconcile_runtime_info(
+    runtime: &mut WorkspaceRuntimeInfo,
+    observed: crate::runtime::RuntimeInfo,
+) {
+    runtime.state = Some(observed.status);
+    runtime.observed_cpu_count = Some(observed.cpu_count);
+    runtime.observed_memory_mib = Some(observed.memory_mib);
+    if runtime.provider_id != observed.identity {
+        runtime
+            .drift
+            .push("provider identity differs from metadata".to_owned());
+    }
+    if runtime.image != observed.image {
+        runtime.drift.push(format!(
+            "image configured={} observed={}",
+            runtime.image, observed.image
+        ));
+    }
+    if runtime.cpu_count != observed.cpu_count {
+        runtime.drift.push(format!(
+            "cpus configured={} observed={}",
+            runtime.cpu_count, observed.cpu_count
+        ));
+    }
+    if runtime.memory_mib != observed.memory_mib {
+        runtime.drift.push(format!(
+            "memory-mib configured={} observed={}",
+            runtime.memory_mib, observed.memory_mib
+        ));
     }
 }
 
@@ -338,6 +404,64 @@ fn format_workspace_info_table(info: &WorkspaceInfo) -> String {
         .and_then(|runtime| runtime.state)
         .map(|state| format!("{state:?}").to_ascii_lowercase())
         .unwrap_or_else(|| "-".to_owned());
+    let runtime_cpus = info
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.cpu_count.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+    let runtime_memory = info
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.memory_mib.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+    let runtime_network = info
+        .runtime
+        .as_ref()
+        .map(|runtime| match runtime.network {
+            crate::runtime::RuntimeNetworkPolicy::Disabled => "disabled",
+        })
+        .unwrap_or("-");
+    let runtime_seccomp = info
+        .runtime
+        .as_ref()
+        .map(|runtime| match runtime.seccomp {
+            crate::runtime::RuntimeSeccompPolicy::Required => "required",
+            crate::runtime::RuntimeSeccompPolicy::AllowUnqualifiedProvider => {
+                "allow-unqualified-provider"
+            }
+            crate::runtime::RuntimeSeccompPolicy::LegacyUnqualifiedProvider => {
+                "legacy-unqualified-provider"
+            }
+        })
+        .unwrap_or("-");
+    let observed_cpus = info
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.observed_cpu_count)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+    let observed_memory = info
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.observed_memory_mib)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+    let runtime_drift = info
+        .runtime
+        .as_ref()
+        .map(|runtime| {
+            if runtime.drift.is_empty() {
+                "-".to_owned()
+            } else {
+                runtime.drift.join(", ")
+            }
+        })
+        .unwrap_or_else(|| "-".to_owned());
+    let advisory_locks = info
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.advisory_locks)
+        .unwrap_or("-");
 
     format_table(
         ["FIELD", "VALUE"],
@@ -353,6 +477,14 @@ fn format_workspace_info_table(info: &WorkspaceInfo) -> String {
             ["runtime-id", runtime_id],
             ["image", runtime_image],
             ["runtime-state", runtime_state.as_str()],
+            ["cpus", runtime_cpus.as_str()],
+            ["memory-mib", runtime_memory.as_str()],
+            ["network", runtime_network],
+            ["seccomp", runtime_seccomp],
+            ["observed-cpus", observed_cpus.as_str()],
+            ["observed-memory-mib", observed_memory.as_str()],
+            ["runtime-drift", runtime_drift.as_str()],
+            ["advisory-locks", advisory_locks],
         ],
     )
 }
@@ -380,7 +512,13 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
             from,
             runtime,
             image,
+            cpus,
+            memory_mib,
+            #[cfg(target_os = "linux")]
+            allow_unqualified_seccomp,
         } => {
+            #[cfg(not(target_os = "linux"))]
+            let allow_unqualified_seccomp = false;
             let (home, backend) = prepare_home()?;
             let source = env::current_dir()?;
             let workspace_path = match runtime {
@@ -403,6 +541,16 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                 Some(RuntimeChoice::Boxlite) => {
                     #[cfg(feature = "microvm-boxlite")]
                     {
+                        let policy = crate::runtime::RuntimePolicy {
+                            cpu_count: cpus,
+                            memory_mib,
+                            network: crate::runtime::RuntimeNetworkPolicy::Disabled,
+                            seccomp: if allow_unqualified_seccomp {
+                                crate::runtime::RuntimeSeccompPolicy::AllowUnqualifiedProvider
+                            } else {
+                                crate::runtime::RuntimeSeccompPolicy::Required
+                            },
+                        };
                         run_async(crate::lifecycle::create_workspace_with_runtime(
                             &home,
                             &backend,
@@ -410,11 +558,12 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                             &source,
                             from.as_deref(),
                             image.unwrap_or_else(|| "alpine:3.22".to_owned()),
+                            policy,
                         ))?
                     }
                     #[cfg(not(feature = "microvm-boxlite"))]
                     {
-                        let _ = image;
+                        let _ = (image, cpus, memory_mib, allow_unqualified_seccomp);
                         bail!("BoxLite support is not enabled in this Pando build")
                     }
                 }
@@ -464,7 +613,7 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                     run_async(crate::lifecycle::inspect_workspace_runtime(&home, &name))?;
                 let mut info = workspace_info_from_metadata(state_dir(&home, &name), metadata);
                 if let (Some(runtime), Some(observed)) = (info.runtime.as_mut(), observed) {
-                    runtime.state = Some(observed.status);
+                    reconcile_runtime_info(runtime, observed);
                 }
                 info
             };
@@ -604,6 +753,43 @@ mod tests {
     use clap_complete::{generate, Shell};
     use serde_json::Value;
     use std::{ffi::OsStr, fs};
+
+    #[cfg(feature = "microvm-boxlite")]
+    #[test]
+    fn runtime_reconciliation_preserves_configuration_and_reports_every_observed_drift() {
+        let mut runtime = super::WorkspaceRuntimeInfo {
+            kind: "boxlite",
+            provider_id: crate::runtime::RuntimeIdentity::new("configured-id"),
+            image: "alpine:3.22".to_owned(),
+            cpu_count: 2,
+            memory_mib: 512,
+            network: crate::runtime::RuntimeNetworkPolicy::Disabled,
+            seccomp: crate::runtime::RuntimeSeccompPolicy::AllowUnqualifiedProvider,
+            advisory_locks: "host-guest-unsupported",
+            state: None,
+            observed_cpu_count: None,
+            observed_memory_mib: None,
+            drift: Vec::new(),
+        };
+        super::reconcile_runtime_info(
+            &mut runtime,
+            crate::runtime::RuntimeInfo {
+                identity: crate::runtime::RuntimeIdentity::new("observed-id"),
+                image: "debian:stable".to_owned(),
+                status: crate::runtime::RuntimeStatus::Running,
+                cpu_count: 4,
+                memory_mib: 1024,
+            },
+        );
+
+        assert_eq!(runtime.cpu_count, 2);
+        assert_eq!(runtime.memory_mib, 512);
+        assert_eq!(runtime.observed_cpu_count, Some(4));
+        assert_eq!(runtime.observed_memory_mib, Some(1024));
+        assert_eq!(runtime.drift.len(), 4);
+        assert!(runtime.drift.iter().any(|item| item.contains("identity")));
+        assert!(runtime.drift.iter().any(|item| item.contains("image")));
+    }
 
     #[test]
     fn create_accepts_name_and_optional_from_revset() {

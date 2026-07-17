@@ -1,5 +1,7 @@
 #![cfg(feature = "microvm-boxlite")]
 
+mod common;
+
 use pando::runtime::{BoxLiteRuntimeBackend, RuntimeBackend, RuntimeSpec, RuntimeStatus};
 
 #[test]
@@ -11,7 +13,7 @@ fn alpine_box_survives_stop_and_restart_before_removal() {
     async_runtime.block_on(async {
         let backend = BoxLiteRuntimeBackend::new(pando_home.path()).unwrap();
         let identity = backend
-            .create(RuntimeSpec::new("alpine:3.22"))
+            .create(RuntimeSpec::new("alpine:3.22").with_policy(common::qualified_runtime_policy()))
             .await
             .unwrap();
 

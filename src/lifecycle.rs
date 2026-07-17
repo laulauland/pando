@@ -307,10 +307,12 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
     from: &Path,
     from_revset: Option<&str>,
     image: String,
+    policy: crate::runtime::RuntimePolicy,
 ) -> Result<PathBuf> {
     use crate::runtime::{BoxLiteRuntimeBackend, RuntimeBackend, RuntimeSpec};
 
     validate_name(name)?;
+    policy.validate()?;
     let _lock = acquire_runtime_lock(home).await?;
     ensure_home(home)?;
     let runtime = BoxLiteRuntimeBackend::new(home)?;
@@ -360,7 +362,8 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
     };
     let mut runtime_spec = RuntimeSpec::new(image.clone())
         .with_workspace(workspace_path.clone())
-        .with_name(provider_name.clone());
+        .with_name(provider_name.clone())
+        .with_policy(policy);
     if let Some(mount) = jj_mount {
         runtime_spec = runtime_spec.with_jj_store(mount);
     }
@@ -419,7 +422,11 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
             return Err(error);
         }
     };
-    metadata.runtime = Some(RuntimeMetadata { identity, image });
+    metadata.runtime = Some(RuntimeMetadata {
+        identity,
+        image,
+        policy,
+    });
     if let Err(error) = write_metadata(&state_dir, &metadata) {
         if let Some(runtime_metadata) = metadata.runtime.as_ref() {
             if let Err(cleanup) =
@@ -767,6 +774,7 @@ mod tests {
         metadata.runtime = Some(RuntimeMetadata {
             identity: RuntimeIdentity::new("must-not-be-inspected"),
             image: "alpine:3.22".to_owned(),
+            policy: Default::default(),
         });
         write_metadata(&escaped_state, &metadata).unwrap();
 
@@ -792,11 +800,40 @@ mod tests {
             source.path(),
             None,
             "alpine:3.22".to_owned(),
+            crate::runtime::RuntimePolicy::default(),
         )
         .await
         .unwrap_err();
 
         assert!(error.to_string().contains("path separators"));
+        assert!(!home.path().join("runtime").exists());
+        assert!(!home.path().join("workspaces").exists());
+    }
+
+    #[cfg(feature = "microvm-boxlite")]
+    #[tokio::test]
+    async fn runtime_create_rejects_invalid_policy_before_workspace_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let policy = crate::runtime::RuntimePolicy {
+            cpu_count: 0,
+            seccomp: crate::runtime::RuntimeSeccompPolicy::AllowUnqualifiedProvider,
+            ..Default::default()
+        };
+
+        let error = create_workspace_with_runtime(
+            home.path(),
+            &SimpleCowBackend,
+            "invalid-policy",
+            source.path(),
+            None,
+            "alpine:3.22".to_owned(),
+            policy,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("CPU count"));
         assert!(!home.path().join("runtime").exists());
         assert!(!home.path().join("workspaces").exists());
     }
@@ -1060,6 +1097,7 @@ mod tests {
         metadata.runtime = Some(RuntimeMetadata {
             identity: RuntimeIdentity::new("committed"),
             image: "alpine:3.22".to_owned(),
+            policy: Default::default(),
         });
         write_metadata(&state, &metadata).unwrap();
         provisional_transaction(
@@ -1169,6 +1207,7 @@ mod tests {
         let runtime_metadata = RuntimeMetadata {
             identity: RuntimeIdentity::new("provider"),
             image: "alpine:3.22".to_owned(),
+            policy: Default::default(),
         };
         let mut metadata = Metadata::new("demo", home.path().to_owned(), workspace_path);
         metadata.runtime = Some(runtime_metadata.clone());
@@ -1202,6 +1241,7 @@ mod tests {
         let runtime_metadata = RuntimeMetadata {
             identity: RuntimeIdentity::new("provider"),
             image: "alpine:3.22".to_owned(),
+            policy: Default::default(),
         };
         let workspace_path = workspace_dir(home.path(), "demo");
         fs::create_dir_all(&workspace_path).unwrap();
@@ -1377,6 +1417,7 @@ mod tests {
         metadata.runtime = Some(RuntimeMetadata {
             identity: RuntimeIdentity::new("box-123"),
             image: "alpine:3.22".to_owned(),
+            policy: Default::default(),
         });
         write_metadata(&state_dir, &metadata).unwrap();
 
