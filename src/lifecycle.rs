@@ -10,6 +10,8 @@ use crate::{
 };
 
 #[cfg(feature = "microvm-boxlite")]
+use crate::jj::jj_runtime_mount;
+#[cfg(feature = "microvm-boxlite")]
 use crate::metadata::RuntimeMetadata;
 use anyhow::{bail, Context, Result};
 use std::{
@@ -145,9 +147,35 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
     validate_name(name)?;
     let _lock = acquire_runtime_lock(home).await?;
     ensure_home(home)?;
-    let runtime = BoxLiteRuntimeBackend::new(home)?;
     let provider_name = runtime_attempt_name(name)?;
     let workspace_path = create_workspace_locked(home, backend, name, from, from_revset)?;
+    let metadata = match read_metadata(&state_dir(home, name)) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            destroy_workspace_locked(home, backend, name, false).with_context(|| {
+                format!("workspace metadata validation failed ({error:#}); rollback failed")
+            })?;
+            return Err(error);
+        }
+    };
+    let jj_mount = match jj_runtime_mount(&workspace_path, &metadata.canonical_root) {
+        Ok(mount) => mount,
+        Err(error) => {
+            destroy_workspace_locked(home, backend, name, false).with_context(|| {
+                format!("jj runtime mount validation failed ({error:#}); workspace rollback failed")
+            })?;
+            return Err(error.context("jj runtime mount validation failed"));
+        }
+    };
+    let runtime = match BoxLiteRuntimeBackend::new(home) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            destroy_workspace_locked(home, backend, name, false).with_context(|| {
+                format!("runtime initialization failed ({error:#}); workspace rollback failed")
+            })?;
+            return Err(error);
+        }
+    };
     let attempt_path = state_dir(home, name).join("runtime-attempt");
     if let Err(error) = write_runtime_attempt(&attempt_path, &provider_name) {
         if error
@@ -172,14 +200,13 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
             )
         }
     }
-    let identity = match runtime
-        .create(
-            RuntimeSpec::new(image.clone())
-                .with_workspace(workspace_path.clone())
-                .with_name(provider_name.clone()),
-        )
-        .await
-    {
+    let mut runtime_spec = RuntimeSpec::new(image.clone())
+        .with_workspace(workspace_path.clone())
+        .with_name(provider_name.clone());
+    if let Some(mount) = jj_mount {
+        runtime_spec = runtime_spec.with_jj_store(mount);
+    }
+    let identity = match runtime.create(runtime_spec).await {
         Ok(identity) => identity,
         Err(error) => {
             if let Err(reconcile) =

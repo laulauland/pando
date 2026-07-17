@@ -18,11 +18,13 @@ impl RuntimeIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct RuntimeSpec {
-    pub image: String,
-    pub workspace_path: Option<PathBuf>,
-    pub name: Option<String>,
+    image: String,
+    workspace_path: Option<PathBuf>,
+    name: Option<String>,
+    #[cfg(feature = "microvm-boxlite")]
+    jj_store: Option<crate::jj::JjRuntimeMount>,
 }
 
 impl RuntimeSpec {
@@ -31,6 +33,8 @@ impl RuntimeSpec {
             image: image.into(),
             workspace_path: None,
             name: None,
+            #[cfg(feature = "microvm-boxlite")]
+            jj_store: None,
         }
     }
 
@@ -41,6 +45,17 @@ impl RuntimeSpec {
 
     pub fn with_name(mut self, name: String) -> Self {
         self.name = Some(name);
+        self
+    }
+
+    pub fn image(&self) -> &str {
+        &self.image
+    }
+
+    #[cfg(feature = "microvm-boxlite")]
+    pub(crate) fn with_jj_store(mut self, store: crate::jj::JjRuntimeMount) -> Self {
+        debug_assert!(self.workspace_path.is_some());
+        self.jj_store = Some(store);
         self
     }
 }
@@ -189,12 +204,15 @@ mod boxlite_backend {
 
     impl RuntimeBackend for BoxLiteRuntimeBackend {
         async fn create(&self, spec: RuntimeSpec) -> Result<RuntimeIdentity> {
+            if spec.jj_store.is_some() && spec.workspace_path.is_none() {
+                bail!("invalid runtime topology: jj store requires /workspace");
+            }
             let mut advanced = boxlite::AdvancedBoxOptions::default();
             // BoxLite 0.9.7's bundled filter kills libkrun with SIGSYS on gondor's
             // Linux 7.1 kernel. Keep the rest of its jailer enabled while the
             // syscall profile is qualified in stage 5.
             advanced.security.seccomp_enabled = false;
-            let volumes = spec
+            let mut volumes: Vec<VolumeSpec> = spec
                 .workspace_path
                 .map(|path| -> Result<VolumeSpec> {
                     Ok(VolumeSpec {
@@ -210,6 +228,19 @@ mod boxlite_backend {
                 .transpose()?
                 .into_iter()
                 .collect();
+            if let Some(store) = spec.jj_store.as_ref() {
+                store.revalidate()?;
+                volumes.push(VolumeSpec {
+                    host_path: store
+                        .host_repo_path()
+                        .canonicalize()
+                        .context("could not canonicalize runtime volume")?
+                        .to_string_lossy()
+                        .into_owned(),
+                    guest_path: store.guest_repo_path().to_string_lossy().into_owned(),
+                    read_only: false,
+                });
+            }
             let options = BoxOptions {
                 cpus: Some(CPU_COUNT),
                 memory_mib: Some(MEMORY_MIB),
@@ -227,6 +258,19 @@ mod boxlite_backend {
                 .create(options, spec.name)
                 .await
                 .context("could not create BoxLite runtime")?;
+            if let Some(store) = spec.jj_store.as_ref() {
+                if let Err(error) = store.revalidate() {
+                    let cleanup = self.runtime.remove(litebox.id().as_ref(), false).await;
+                    return Err(match cleanup {
+                        Ok(()) => error.context(
+                            "jj store identity changed during provider handoff; provider removed",
+                        ),
+                        Err(cleanup) => error.context(format!(
+                            "jj store identity changed during provider handoff and provider cleanup failed: {cleanup}"
+                        )),
+                    });
+                }
+            }
             Ok(RuntimeIdentity::new(litebox.id().to_string()))
         }
 

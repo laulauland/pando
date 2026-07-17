@@ -132,8 +132,8 @@ fn repair_migrated_workspaces<B: CowBackend>(home: &Path, backend: &B) -> Result
             backend.resume_migration(&entry.path(), &expected, &metadata.canonical_root)?;
             metadata.workspace_path = expected;
         }
-        repair_jj_repo_pointer(&metadata)?;
         if metadata_changed {
+            repair_jj_repo_pointer(&metadata)?;
             write_metadata(&entry.path(), &metadata)?;
         }
     }

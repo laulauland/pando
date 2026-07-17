@@ -11,7 +11,7 @@ use std::{
 
 #[test]
 #[ignore = "requires KVM/HVF, OCI registry access, and fuse-overlayfs or APFS"]
-fn non_jj_workspace_runs_tools_and_preserves_isolation() {
+fn non_jj_and_native_jj_workspaces_run_tools_and_preserve_isolation() {
     let fixture = tempfile::tempdir().unwrap();
     let source = fixture.path().join("source");
     let home = fixture.path().join("home");
@@ -180,6 +180,127 @@ fn non_jj_workspace_runs_tools_and_preserves_isolation() {
     assert!(decoy.try_wait().unwrap().is_none());
     decoy.kill().unwrap();
     decoy.wait().unwrap();
+
+    run_jj_workspace_workflow(fixture.path(), &home);
+}
+
+fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
+    let source = fixture.join("jj source with spaces");
+    let jj = host_jj_binary();
+    let initialized = Command::new(&jj)
+        .args(["git", "init", "--no-colocate"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "could not initialize jj fixture: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    fs::write(source.join("tracked.txt"), "canonical\n").unwrap();
+    fs::copy(&jj, source.join("guest-jj")).unwrap();
+    fs::write(
+        source.join("jj-config.toml"),
+        "[user]\nname = \"Pando Guest\"\nemail = \"guest@example.invalid\"\n",
+    )
+    .unwrap();
+    Command::new(&jj)
+        .current_dir(&source)
+        .args(["describe", "-m", "canonical base"])
+        .assert_success();
+    Command::new(&jj)
+        .current_dir(&source)
+        .args(["new"])
+        .assert_success();
+
+    command(home, &source)
+        .args([
+            "create",
+            "jjdemo",
+            "--runtime",
+            "boxlite",
+            "--image",
+            "alpine:3.22",
+        ])
+        .assert_success();
+    let workspace = home.join("workspaces/jjdemo");
+    fs::write(source.join("canonical-after-create.txt"), "host only\n").unwrap();
+    let jj_command = "JJ_CONFIG=/workspace/jj-config.toml /workspace/guest-jj";
+
+    let root = command(home, &source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!("{jj_command} root"),
+        ])
+        .assert_success();
+    assert_eq!(String::from_utf8(root.stdout).unwrap().trim(), "/workspace");
+    command(home, &source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "{jj_command} status >/tmp/status && printf 'guest edit\\n' > tracked.txt && {jj_command} diff --summary | grep tracked.txt && {jj_command} describe -m 'guest change' && {jj_command} new && {jj_command} log -r @- --no-graph -T description | grep 'guest change' && test ! -e '/jj source with spaces/canonical-after-create.txt'"
+            ),
+        ])
+        .assert_success();
+    assert_eq!(
+        fs::read_to_string(workspace.join("tracked.txt")).unwrap(),
+        "guest edit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        "canonical\n"
+    );
+    let host_log = Command::new(&jj)
+        .current_dir(&workspace)
+        .args(["log", "-r", "@-", "--no-graph", "-T", "description"])
+        .assert_success();
+    assert!(String::from_utf8_lossy(&host_log.stdout).contains("guest change"));
+
+    command(home, &source)
+        .args(["stop", "jjdemo"])
+        .assert_success();
+    let restarted = command(home, &source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!("{jj_command} log -r @- --no-graph -T description"),
+        ])
+        .assert_success();
+    assert!(String::from_utf8_lossy(&restarted.stdout).contains("guest change"));
+
+    command(home, &source)
+        .args(["remove", "jjdemo"])
+        .assert_success();
+    assert!(!workspace.exists());
+    let workspaces = Command::new(&jj)
+        .current_dir(&source)
+        .args(["workspace", "list"])
+        .assert_success();
+    assert!(!String::from_utf8_lossy(&workspaces.stdout).contains("pando-jjdemo"));
+    assert_eq!(
+        fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        "canonical\n"
+    );
+}
+
+fn host_jj_binary() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("PANDO_TEST_JJ") {
+        return path.into();
+    }
+    let output = Command::new("mise").args(["which", "jj"]).output().unwrap();
+    assert!(output.status.success(), "mise could not resolve jj");
+    std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
 }
 
 struct WorkspaceCleanup {
@@ -189,10 +310,12 @@ struct WorkspaceCleanup {
 
 impl Drop for WorkspaceCleanup {
     fn drop(&mut self) {
-        if self.home.join("state/demo").exists() {
-            let _ = command(&self.home, &self.source)
-                .args(["remove", "demo"])
-                .status();
+        for name in ["demo", "jjdemo"] {
+            if self.home.join("state").join(name).exists() {
+                let _ = command(&self.home, &self.source)
+                    .args(["remove", name])
+                    .status();
+            }
         }
     }
 }

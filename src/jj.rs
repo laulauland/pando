@@ -53,6 +53,178 @@ pub fn canonical_jj_root(canonical_root: &Path) -> Result<JjCanonicalRoot> {
     Ok(JjCanonicalRoot { path })
 }
 
+#[derive(Debug)]
+pub struct JjRuntimeMount {
+    host_repo_path: PathBuf,
+    guest_repo_path: PathBuf,
+    identity: Vec<PathIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PathIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl JjRuntimeMount {
+    pub fn host_repo_path(&self) -> &Path {
+        &self.host_repo_path
+    }
+
+    pub fn guest_repo_path(&self) -> &Path {
+        &self.guest_repo_path
+    }
+
+    pub fn revalidate(&self) -> Result<()> {
+        for expected in &self.identity {
+            let actual = path_identity(&expected.path)?;
+            if &actual != expected {
+                bail!(
+                    "validated jj store path identity changed before provider handoff: {}",
+                    expected.path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn path_identity(path: &Path) -> Result<PathIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        bail!(
+            "jj store identity path is not a real directory: {}",
+            path.display()
+        );
+    }
+    Ok(PathIdentity {
+        path: path.to_owned(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn path_identity(path: &Path) -> Result<PathIdentity> {
+    bail!(
+        "safe jj runtime store identity validation is unsupported on this platform: {}",
+        path.display()
+    )
+}
+
+fn capture_path_identity(path: &Path) -> Result<Vec<PathIdentity>> {
+    let mut identities = vec![path_identity(Path::new("/"))?];
+    let mut current = PathBuf::from("/");
+    for component in path.components() {
+        if let std::path::Component::Normal(component) = component {
+            current.push(component);
+            identities.push(path_identity(&current)?);
+        }
+    }
+    Ok(identities)
+}
+
+/// Validate the native workspace pointer and reproduce its resolution in the guest.
+pub fn jj_runtime_mount(
+    workspace_root: &Path,
+    canonical_root: &Path,
+) -> Result<Option<JjRuntimeMount>> {
+    let pointer_path = workspace_root.join(".jj/repo");
+    if !workspace_root.join(".jj").exists() {
+        return Ok(None);
+    }
+    let pointer_metadata = fs::symlink_metadata(&pointer_path).with_context(|| {
+        format!(
+            "jj workspace repo pointer is missing: {}",
+            pointer_path.display()
+        )
+    })?;
+    if !pointer_metadata.file_type().is_file() || pointer_metadata.file_type().is_symlink() {
+        bail!("jj workspace repo pointer must be a regular file");
+    }
+    let pointer_bytes = fs::read(&pointer_path)?;
+    let pointer_text = std::str::from_utf8(&pointer_bytes)
+        .context("jj workspace repo pointer is not valid UTF-8")?;
+    if pointer_text.is_empty()
+        || pointer_text.trim() != pointer_text
+        || pointer_text.bytes().any(|byte| byte == 0)
+    {
+        bail!("jj workspace repo pointer has unsafe or malformed contents");
+    }
+    let pointer = Path::new(pointer_text);
+    if pointer.is_absolute() {
+        bail!("jj workspace repo pointer must be relative");
+    }
+    if pointer.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::RootDir | std::path::Component::Prefix(_)
+        )
+    }) {
+        bail!("jj workspace repo pointer has an unsafe path form");
+    }
+
+    let actual_repo = pointer_path
+        .parent()
+        .context("jj workspace repo pointer has no parent")?
+        .join(pointer)
+        .canonicalize()
+        .context("could not resolve jj workspace repo pointer")?;
+    let expected_repo = canonical_root
+        .join(".jj/repo")
+        .canonicalize()
+        .context("could not resolve canonical jj repository store")?;
+    if actual_repo != expected_repo {
+        bail!(
+            "jj workspace repo pointer resolves to {}, expected {}",
+            actual_repo.display(),
+            expected_repo.display()
+        );
+    }
+    let git_target = expected_repo.join("store/git_target");
+    if git_target.is_file() {
+        let target =
+            fs::read_to_string(&git_target).context("could not read jj git backend target")?;
+        let resolved_target = git_target
+            .parent()
+            .context("jj git backend target has no parent")?
+            .join(target)
+            .canonicalize()
+            .context("could not resolve jj git backend target")?;
+        if !resolved_target.starts_with(&expected_repo) {
+            bail!(
+                "jj repository store depends on path outside canonical .jj/repo: {}",
+                resolved_target.display()
+            );
+        }
+    }
+
+    let mut guest_repo = PathBuf::from("/workspace/.jj");
+    for component in pointer.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                guest_repo.pop();
+            }
+            std::path::Component::Normal(component) => guest_repo.push(component),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => unreachable!(),
+        }
+    }
+    if guest_repo == Path::new("/") || guest_repo.starts_with("/workspace") {
+        bail!("jj workspace repo pointer produces an unsafe guest mount path");
+    }
+    let identity = capture_path_identity(&expected_repo)?;
+    Ok(Some(JjRuntimeMount {
+        host_repo_path: expected_repo,
+        guest_repo_path: guest_repo,
+        identity,
+    }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JjRegistration {
     pub workspace_name: String,
@@ -489,8 +661,8 @@ fn default_base_commit(
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_jj_root, has_jj_repo, pando_workspace_name};
-    use std::fs;
+    use super::{canonical_jj_root, has_jj_repo, jj_runtime_mount, pando_workspace_name};
+    use std::{fs, path::Path};
 
     #[test]
     fn detects_jj_only_at_canonical_root() {
@@ -514,5 +686,97 @@ mod tests {
     #[test]
     fn formats_pando_workspace_name() {
         assert_eq!(pando_workspace_name("foo"), "pando-foo");
+    }
+
+    fn pointer_fixture(
+        pointer: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("nested level/deeper/work space");
+        let canonical = root.path().join("canonical space");
+        fs::create_dir_all(workspace.join(".jj")).unwrap();
+        fs::create_dir_all(canonical.join(".jj/repo")).unwrap();
+        fs::write(workspace.join(".jj/repo"), pointer).unwrap();
+        (root, workspace, canonical)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_mount_resolves_nested_relative_pointer_with_spaces() {
+        let (_root, workspace, canonical) =
+            pointer_fixture("../../../../canonical space/./.jj/repo");
+        let mount = jj_runtime_mount(&workspace, &canonical).unwrap().unwrap();
+        assert_eq!(mount.host_repo_path(), canonical.join(".jj/repo"));
+        assert_eq!(
+            mount.guest_repo_path(),
+            Path::new("/canonical space/.jj/repo")
+        );
+        mount.revalidate().unwrap();
+    }
+
+    #[test]
+    fn runtime_mount_accepts_non_jj_workspace_without_a_store_mount() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(jj_runtime_mount(root.path(), root.path())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn runtime_mount_rejects_malformed_absolute_and_mismatched_pointers() {
+        for pointer in ["/tmp/store", "../../../../canonical space/.jj/repo\n", ""] {
+            let (_root, workspace, canonical) = pointer_fixture(pointer);
+            assert!(jj_runtime_mount(&workspace, &canonical).is_err());
+        }
+
+        let (root, workspace, canonical) = pointer_fixture("../../../../other/.jj/repo");
+        fs::create_dir_all(root.path().join("other/.jj/repo")).unwrap();
+        assert!(jj_runtime_mount(&workspace, &canonical).is_err());
+    }
+
+    #[test]
+    fn runtime_mount_rejects_store_destination_overlapping_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let canonical = workspace.join("canonical");
+        fs::create_dir_all(workspace.join(".jj")).unwrap();
+        fs::create_dir_all(canonical.join(".jj/repo")).unwrap();
+        fs::write(workspace.join(".jj/repo"), "../canonical/.jj/repo").unwrap();
+        assert!(jj_runtime_mount(&workspace, &canonical).is_err());
+    }
+
+    #[test]
+    fn runtime_mount_rejects_repo_store_with_external_git_backend() {
+        let (root, workspace, canonical) = pointer_fixture("../../../../canonical space/.jj/repo");
+        fs::create_dir_all(canonical.join(".jj/repo/store")).unwrap();
+        fs::create_dir_all(root.path().join("external.git")).unwrap();
+        fs::write(
+            canonical.join(".jj/repo/store/git_target"),
+            "../../../../external.git",
+        )
+        .unwrap();
+        assert!(jj_runtime_mount(&workspace, &canonical).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_mount_revalidation_detects_store_identity_replacement() {
+        let (_root, workspace, canonical) = pointer_fixture("../../../../canonical space/.jj/repo");
+        let mount = jj_runtime_mount(&workspace, &canonical).unwrap().unwrap();
+        fs::rename(
+            canonical.join(".jj/repo"),
+            canonical.join(".jj/original-repo"),
+        )
+        .unwrap();
+        fs::create_dir(canonical.join(".jj/repo")).unwrap();
+        assert!(mount.revalidate().is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn runtime_mount_explicitly_rejects_unsupported_identity_platform() {
+        let (_root, workspace, canonical) = pointer_fixture("../../../../canonical space/.jj/repo");
+        let error = jj_runtime_mount(&workspace, &canonical).unwrap_err();
+        assert!(error.to_string().contains("unsupported on this platform"));
     }
 }

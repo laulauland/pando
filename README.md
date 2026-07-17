@@ -34,6 +34,8 @@ Build with `--features microvm-boxlite` to attach an optional BoxLite micro-VM t
 
 `exec` preserves argument boundaries and returns the guest command's exit status. `shell` opens an interactive `/bin/sh`; both commands restart a stopped runtime. Runtime workspaces are mounted read-write at `/workspace`, which is also the guest command's working directory. `info` reports the configured image, provider ID, and observed runtime state. Removing a runtime workspace stops and removes its VM before deleting the copy-on-write workspace.
 
+For native `jj` workspaces, Pando also mounts only the canonical `.jj/repo` store read-write at the guest path selected by the workspace's unchanged relative `.jj/repo` pointer. The canonical working copy is not mounted. Pando validates that pointer against the recorded canonical store before creating the VM; absolute, malformed, mismatched, overlapping, and externally backed store layouts fail closed. In particular, this stage supports self-contained/non-colocated jj repositories; a colocated Git backend depends on the canonical `.git` outside `.jj/repo` and is rejected rather than exposing it.
+
 Names cannot contain whitespace or path separators. `--from` takes a `jj` revset that must resolve to exactly one commit; it is silently ignored when the source is not a `jj` repository. With no `--from`, the new workspace is based on the canonical workspace's `@-`.
 
 `pando list` prints an aligned table — `NAME`, `AGE`, `BASE` (jj change id revision), and `JJ` (the registered workspace name, or `-` for non-jj sources):
