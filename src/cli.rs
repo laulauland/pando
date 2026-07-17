@@ -1,9 +1,14 @@
+#[cfg(not(feature = "microvm-boxlite"))]
+use crate::lifecycle::{create_workspace, destroy_workspace, list_workspaces};
 use crate::{
     backend::PlatformCowBackend,
     home::{legacy_pando_home, pando_home, state_dir},
-    lifecycle::{create_workspace, destroy_workspace, list_workspaces},
-    metadata::{read_metadata, JjMetadata},
+    metadata::JjMetadata,
     migration::migrate_legacy_home_if_needed,
+};
+#[cfg(any(test, not(feature = "microvm-boxlite")))]
+use crate::{
+    metadata::{has_runtime_transaction, read_metadata},
     naming::validate_name,
 };
 #[cfg(not(feature = "microvm-boxlite"))]
@@ -248,8 +253,12 @@ struct WorkspaceJjInfo {
     repo_path: Option<PathBuf>,
 }
 
+#[cfg(any(test, not(feature = "microvm-boxlite")))]
 fn workspace_info(home: &Path, name: &str) -> Result<WorkspaceInfo> {
     validate_name(name)?;
+    if has_runtime_transaction(home, name)? {
+        anyhow::bail!("workspace creation is incomplete and requires runtime recovery: {name}");
+    }
     let state_dir = state_dir(home, name);
     let metadata =
         read_metadata(&state_dir).with_context(|| format!("workspace not found: {name}"))?;
@@ -375,7 +384,22 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
             let (home, backend) = prepare_home()?;
             let source = env::current_dir()?;
             let workspace_path = match runtime {
-                None => create_workspace(&home, &backend, &name, &source, from.as_deref())?,
+                None => {
+                    #[cfg(feature = "microvm-boxlite")]
+                    {
+                        run_async(crate::lifecycle::create_workspace_reconciled(
+                            &home,
+                            &backend,
+                            &name,
+                            &source,
+                            from.as_deref(),
+                        ))?
+                    }
+                    #[cfg(not(feature = "microvm-boxlite"))]
+                    {
+                        create_workspace(&home, &backend, &name, &source, from.as_deref())?
+                    }
+                }
                 Some(RuntimeChoice::Boxlite) => {
                     #[cfg(feature = "microvm-boxlite")]
                     {
@@ -398,8 +422,16 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
             println!("{}", workspace_path.display());
         }
         Command::List => {
-            let (home, _) = prepare_home()?;
-            let rows = list_workspaces(&home)?
+            let (home, backend) = prepare_home()?;
+            #[cfg(not(feature = "microvm-boxlite"))]
+            let _ = &backend;
+            #[cfg(feature = "microvm-boxlite")]
+            let workspaces = run_async(crate::lifecycle::list_workspaces_reconciled(
+                &home, &backend,
+            ))?;
+            #[cfg(not(feature = "microvm-boxlite"))]
+            let workspaces = list_workspaces(&home)?;
+            let rows = workspaces
                 .into_iter()
                 .map(|metadata| {
                     let age = format_age(metadata.created_at, Utc::now());
@@ -445,7 +477,17 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
             }
         }
         Command::Cd { name, print } => {
-            let (home, _) = prepare_home()?;
+            let (home, backend) = prepare_home()?;
+            #[cfg(not(feature = "microvm-boxlite"))]
+            let _ = &backend;
+            #[cfg(feature = "microvm-boxlite")]
+            let info = workspace_info_from_metadata(
+                state_dir(&home, &name),
+                run_async(crate::lifecycle::read_workspace_reconciled(
+                    &home, &backend, &name,
+                ))?,
+            );
+            #[cfg(not(feature = "microvm-boxlite"))]
             let info = workspace_info(&home, &name)?;
             if print {
                 println!("{}", info.workspace_path.display());
@@ -511,22 +553,26 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
         } => {
             crate::naming::validate_name(&name)?;
             let (home, backend) = prepare_home()?;
-            let has_runtime = read_metadata(&state_dir(&home, &name))
-                .ok()
-                .and_then(|metadata| metadata.runtime)
-                .is_some();
-            if has_runtime {
-                #[cfg(feature = "microvm-boxlite")]
+            #[cfg(feature = "microvm-boxlite")]
+            {
                 run_async(crate::lifecycle::destroy_workspace_with_runtime(
                     &home,
                     &backend,
                     &name,
                     keep_jj_workspace,
                 ))?;
-                #[cfg(not(feature = "microvm-boxlite"))]
-                bail!("BoxLite support is not enabled in this Pando build");
-            } else {
-                destroy_workspace(&home, &backend, &name, keep_jj_workspace)?;
+            }
+            #[cfg(not(feature = "microvm-boxlite"))]
+            {
+                let has_runtime = read_metadata(&state_dir(&home, &name))
+                    .ok()
+                    .and_then(|metadata| metadata.runtime)
+                    .is_some();
+                if has_runtime {
+                    bail!("BoxLite support is not enabled in this Pando build");
+                } else {
+                    destroy_workspace(&home, &backend, &name, keep_jj_workspace)?;
+                }
             }
         }
         Command::Completions { shell } => {

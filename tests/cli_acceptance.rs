@@ -212,6 +212,72 @@ fn cli_info_missing_workspace_is_clear_nonzero_error() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("workspace not found: missing"));
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_commands_fail_closed_on_unsafe_transaction_roots_and_children() {
+    use std::{
+        ffi::CString,
+        os::unix::fs::{symlink, PermissionsExt},
+    };
+
+    for case in [
+        "dangling-root",
+        "live-root",
+        "child-file",
+        "child-symlink",
+        "child-fifo",
+    ] {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("README.md"), "canonical").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        create_workspace(home.path(), &SimpleCowBackend, "demo", source.path(), None).unwrap();
+        let root = home.path().join("transactions");
+        let victim = tempfile::tempdir().unwrap();
+        match case {
+            "dangling-root" => symlink(home.path().join("missing-target"), &root).unwrap(),
+            "live-root" => symlink(victim.path(), &root).unwrap(),
+            child => {
+                fs::create_dir(&root).unwrap();
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+                let entry = root.join("unsafe");
+                match child {
+                    "child-file" => fs::write(entry, "unknown").unwrap(),
+                    "child-symlink" => symlink(victim.path(), entry).unwrap(),
+                    "child-fifo" => {
+                        let entry = CString::new(entry.as_os_str().as_encoded_bytes()).unwrap();
+                        // SAFETY: entry is a valid NUL-terminated path and mkfifo does not retain it.
+                        assert_eq!(unsafe { libc::mkfifo(entry.as_ptr(), 0o600) }, 0);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        for arguments in [
+            vec!["list"],
+            vec!["cd", "demo", "--print"],
+            vec!["create", "new"],
+            vec!["remove", "demo"],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_pando"))
+                .args(&arguments)
+                .current_dir(source.path())
+                .env("PANDO_HOME", home.path())
+                .output()
+                .unwrap();
+            assert!(
+                !output.status.success(),
+                "{case}: command unexpectedly succeeded: {arguments:?}"
+            );
+        }
+        assert!(state_dir(home.path(), "demo").exists());
+        assert!(workspace_dir(home.path(), "demo").exists());
+        assert!(!state_dir(home.path(), "new").exists());
+        assert!(!workspace_dir(home.path(), "new").exists());
+        assert_eq!(fs::read_dir(victim.path()).unwrap().count(), 0);
+    }
+}
+
 #[test]
 fn cli_create_ignores_from_revset_outside_jj_and_uses_current_dir() {
     let source = tempfile::tempdir().unwrap();

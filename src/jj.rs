@@ -185,23 +185,7 @@ pub fn jj_runtime_mount(
             expected_repo.display()
         );
     }
-    let git_target = expected_repo.join("store/git_target");
-    if git_target.is_file() {
-        let target =
-            fs::read_to_string(&git_target).context("could not read jj git backend target")?;
-        let resolved_target = git_target
-            .parent()
-            .context("jj git backend target has no parent")?
-            .join(target)
-            .canonicalize()
-            .context("could not resolve jj git backend target")?;
-        if !resolved_target.starts_with(&expected_repo) {
-            bail!(
-                "jj repository store depends on path outside canonical .jj/repo: {}",
-                resolved_target.display()
-            );
-        }
-    }
+    validate_runtime_store(&expected_repo)?;
 
     let mut guest_repo = PathBuf::from("/workspace/.jj");
     for component in pointer.components() {
@@ -225,6 +209,28 @@ pub fn jj_runtime_mount(
     }))
 }
 
+fn validate_runtime_store(expected_repo: &Path) -> Result<()> {
+    let git_target = expected_repo.join("store/git_target");
+    if git_target.is_file() {
+        let target =
+            fs::read_to_string(&git_target).context("could not read jj git backend target")?;
+        let resolved_target = git_target
+            .parent()
+            .context("jj git backend target has no parent")?
+            .join(target)
+            .canonicalize()
+            .context("could not resolve jj git backend target")?;
+        if !resolved_target.starts_with(expected_repo) {
+            bail!(
+                "jj repository store depends on path outside canonical .jj/repo: {}",
+                resolved_target.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JjRegistration {
     pub workspace_name: String,
@@ -239,6 +245,16 @@ pub struct JjRegistrationPreflight {
     base_commit_id: CommitId,
     copied_source_base_commit_id: Option<CommitId>,
     base_revision: String,
+}
+
+impl JjRegistrationPreflight {
+    /// Prove the canonical store is self-contained and has stable real-directory ancestors
+    /// before a runtime-backed create mutates workspace storage.
+    pub fn preflight_runtime_mount(&self) -> Result<()> {
+        validate_runtime_store(&self.repo_path)?;
+        capture_path_identity(&self.repo_path)?;
+        Ok(())
+    }
 }
 
 pub fn pando_workspace_name(name: &str) -> String {
@@ -572,11 +588,13 @@ pub fn forget_pando_workspace(canonical_root: &Path, workspace_name: &str) -> Re
         .block_on()?;
     let workspace_name = WorkspaceNameBuf::from(workspace_name.to_owned());
 
-    let mut tx = repo.start_transaction();
-    tx.repo_mut().remove_wc_commit(&workspace_name).block_on()?;
-    tx.repo_mut().rebase_descendants().block_on()?;
-    tx.commit(format!("pando: remove {}", workspace_name.as_symbol()))
-        .block_on()?;
+    if repo.view().get_wc_commit_id(&workspace_name).is_some() {
+        let mut tx = repo.start_transaction();
+        tx.repo_mut().remove_wc_commit(&workspace_name).block_on()?;
+        tx.repo_mut().rebase_descendants().block_on()?;
+        tx.commit(format!("pando: remove {}", workspace_name.as_symbol()))
+            .block_on()?;
+    }
 
     // Known limitation: jj-lib keeps workspace names in SimpleWorkspaceStore,
     // which is not part of the repo transaction above. If this forget step

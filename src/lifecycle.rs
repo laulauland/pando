@@ -5,14 +5,20 @@ use crate::{
         forget_pando_workspace, pando_workspace_name, preflight_jj_registration,
         register_pando_workspace, JjRegistrationPreflight,
     },
-    metadata::{read_metadata, write_metadata, JjMetadata, Metadata},
+    metadata::{
+        has_any_runtime_transactions, has_runtime_transaction, read_metadata, write_metadata,
+        JjMetadata, Metadata,
+    },
     naming::validate_name,
 };
 
 #[cfg(feature = "microvm-boxlite")]
 use crate::jj::jj_runtime_mount;
 #[cfg(feature = "microvm-boxlite")]
-use crate::metadata::RuntimeMetadata;
+use crate::metadata::{
+    clear_runtime_transaction, runtime_transaction_directories, runtime_transaction_path,
+    write_runtime_transaction, RuntimeCreateTransaction, RuntimeMetadata,
+};
 use anyhow::{bail, Context, Result};
 use std::{
     fs,
@@ -27,6 +33,137 @@ async fn acquire_runtime_lock(home: &Path) -> Result<PandoLock> {
         .context("runtime lock task failed")?
 }
 
+#[cfg(all(feature = "microvm-boxlite", unix, debug_assertions))]
+fn injected_crash(point: &str) {
+    if std::env::var("PANDO_TEST_CRASH_POINT").as_deref() == Ok(point) {
+        // SAFETY: getpid returns this process and SIGKILL is enabled only by explicit debug tests.
+        unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+    }
+}
+
+#[cfg(not(all(feature = "microvm-boxlite", unix, debug_assertions)))]
+fn injected_crash(_point: &str) {}
+
+#[cfg(feature = "microvm-boxlite")]
+async fn recover_runtime_transactions<B, R>(home: &Path, backend: &B, runtime: &R) -> Result<()>
+where
+    B: CowBackend,
+    R: crate::runtime::RuntimeBackend,
+{
+    for directory in runtime_transaction_directories(home)? {
+        let Some(transaction) = directory.read()? else {
+            if !directory.contains_only_optional_temp()? {
+                bail!(
+                    "runtime transaction directory without a journal contains unknown files: {}",
+                    directory.path().display()
+                );
+            }
+            directory.clear()?;
+            continue;
+        };
+        validate_name(&transaction.name)?;
+        if directory.name() != transaction.name {
+            bail!("runtime recovery record name does not match its directory");
+        }
+        let state_dir = state_dir(home, &transaction.name);
+        if read_metadata(&state_dir).is_ok_and(|metadata| metadata.runtime.is_some()) {
+            clear_runtime_transaction(home, &transaction.name)?;
+            continue;
+        }
+        let identity = match transaction.identity {
+            Some(identity) => runtime.contains(&identity).await?.then_some(identity),
+            None => runtime
+                .find(&transaction.provider_name)
+                .await
+                .context("could not reconcile provisional runtime by exact create token")?,
+        };
+        if let Some(identity) = identity {
+            runtime.stop(&identity).await?;
+            runtime.remove(&identity).await?;
+        }
+        if state_dir.exists() || workspace_dir(home, &transaction.name).exists() {
+            if crate::jj::has_jj_repo(&transaction.canonical_root) {
+                forget_pando_workspace(
+                    &transaction.canonical_root,
+                    &pando_workspace_name(&transaction.name),
+                )?;
+            }
+            backend.destroy(&state_dir, &workspace_dir(home, &transaction.name))?;
+        }
+        clear_runtime_transaction(home, &transaction.name)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "microvm-boxlite")]
+async fn recover_platform_runtime_transactions<R>(home: &Path, runtime: &R) -> Result<()>
+where
+    R: crate::runtime::RuntimeBackend,
+{
+    recover_runtime_transactions(
+        home,
+        &crate::backend::PlatformCowBackend::default(),
+        runtime,
+    )
+    .await
+}
+
+#[cfg(feature = "microvm-boxlite")]
+pub async fn reconcile_runtime_transactions<B: CowBackend>(home: &Path, backend: &B) -> Result<()> {
+    let _lock = acquire_runtime_lock(home).await?;
+    ensure_home(home)?;
+    let runtime = crate::runtime::BoxLiteRuntimeBackend::new(home)?;
+    recover_runtime_transactions(home, backend, &runtime).await
+}
+
+#[cfg(feature = "microvm-boxlite")]
+async fn recover_if_needed_locked<B: CowBackend>(home: &Path, backend: &B) -> Result<()> {
+    if has_any_runtime_transactions(home)? {
+        let runtime = crate::runtime::BoxLiteRuntimeBackend::new(home)?;
+        recover_runtime_transactions(home, backend, &runtime).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "microvm-boxlite")]
+pub async fn create_workspace_reconciled<B: CowBackend>(
+    home: &Path,
+    backend: &B,
+    name: &str,
+    from: &Path,
+    from_revset: Option<&str>,
+) -> Result<PathBuf> {
+    validate_name(name)?;
+    let _lock = acquire_runtime_lock(home).await?;
+    ensure_home(home)?;
+    recover_if_needed_locked(home, backend).await?;
+    create_workspace_locked(home, backend, name, from, from_revset)
+}
+
+#[cfg(feature = "microvm-boxlite")]
+pub async fn list_workspaces_reconciled<B: CowBackend>(
+    home: &Path,
+    backend: &B,
+) -> Result<Vec<Metadata>> {
+    let _lock = acquire_runtime_lock(home).await?;
+    ensure_home(home)?;
+    recover_if_needed_locked(home, backend).await?;
+    list_workspaces(home)
+}
+
+#[cfg(feature = "microvm-boxlite")]
+pub async fn read_workspace_reconciled<B: CowBackend>(
+    home: &Path,
+    backend: &B,
+    name: &str,
+) -> Result<Metadata> {
+    validate_name(name)?;
+    let _lock = acquire_runtime_lock(home).await?;
+    ensure_home(home)?;
+    recover_if_needed_locked(home, backend).await?;
+    read_metadata(&state_dir(home, name)).with_context(|| format!("workspace not found: {name}"))
+}
+
 pub fn create_workspace<B: CowBackend>(
     home: &Path,
     backend: &B,
@@ -37,6 +174,7 @@ pub fn create_workspace<B: CowBackend>(
     validate_name(name)?;
     let _lock = PandoLock::acquire(home)?;
     ensure_home(home)?;
+    has_any_runtime_transactions(home)?;
     create_workspace_locked(home, backend, name, from, from_revset)
 }
 
@@ -46,6 +184,17 @@ fn create_workspace_locked<B: CowBackend>(
     name: &str,
     from: &Path,
     from_revset: Option<&str>,
+) -> Result<PathBuf> {
+    create_workspace_locked_with_hook(home, backend, name, from, from_revset, |_, _| Ok(()))
+}
+
+fn create_workspace_locked_with_hook<B: CowBackend>(
+    home: &Path,
+    backend: &B,
+    name: &str,
+    from: &Path,
+    from_revset: Option<&str>,
+    before_storage: impl FnOnce(&Path, Option<&JjRegistrationPreflight>) -> Result<()>,
 ) -> Result<PathBuf> {
     let source = from.canonicalize()?;
     if !source.is_dir() {
@@ -58,6 +207,7 @@ fn create_workspace_locked<B: CowBackend>(
         bail!("workspace already exists: {}", state_dir.display());
     }
     let jj_preflight = preflight_jj_registration(&source, name, from_revset)?;
+    before_storage(&source, jj_preflight.as_ref())?;
     let workspace_path = backend.create(&state_dir, &workspace_path, &source)?;
 
     let jj = match register_jj_if_needed(&workspace_path, jj_preflight) {
@@ -104,6 +254,9 @@ pub fn destroy_workspace<B: CowBackend>(
     validate_name(name)?;
     let _lock = PandoLock::acquire(home)?;
     ensure_home(home)?;
+    if has_runtime_transaction(home, name)? {
+        bail!("workspace has an incomplete runtime transaction; retry with a runtime-enabled Pando build");
+    }
     destroy_workspace_locked(home, backend, name, keep_jj_workspace)
 }
 
@@ -112,6 +265,16 @@ fn destroy_workspace_locked<B: CowBackend>(
     backend: &B,
     name: &str,
     keep_jj_workspace: bool,
+) -> Result<()> {
+    destroy_workspace_storage_locked(home, backend, name, keep_jj_workspace, true)
+}
+
+fn destroy_workspace_storage_locked<B: CowBackend>(
+    home: &Path,
+    backend: &B,
+    name: &str,
+    keep_jj_workspace: bool,
+    reject_runtime: bool,
 ) -> Result<()> {
     let state_dir = state_dir(home, name);
     let workspace_path = workspace_dir(home, name);
@@ -122,12 +285,15 @@ fn destroy_workspace_locked<B: CowBackend>(
                 workspace_path.display()
             );
         }
-        if metadata.runtime.is_some() {
+        if reject_runtime && metadata.runtime.is_some() {
             bail!("workspace has a runtime; remove it with a runtime-enabled Pando build");
         }
     }
     if !keep_jj_workspace {
         forget_registered_jj_workspace(&state_dir)?;
+        if !reject_runtime {
+            injected_crash("remove-jj-forgotten");
+        }
     }
 
     backend.destroy(&state_dir, &workspace_path)
@@ -147,8 +313,33 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
     validate_name(name)?;
     let _lock = acquire_runtime_lock(home).await?;
     ensure_home(home)?;
+    let runtime = BoxLiteRuntimeBackend::new(home)?;
+    recover_runtime_transactions(home, backend, &runtime).await?;
     let provider_name = runtime_attempt_name(name)?;
-    let workspace_path = create_workspace_locked(home, backend, name, from, from_revset)?;
+    match runtime.find(&provider_name).await {
+        Ok(None) => {}
+        Ok(Some(_)) => bail!("runtime create token unexpectedly already exists"),
+        Err(error) => return Err(error.context("could not preflight runtime create token")),
+    }
+    let mut transaction = RuntimeCreateTransaction {
+        name: name.to_owned(),
+        provider_name: provider_name.clone(),
+        image: image.clone(),
+        canonical_root: from.canonicalize()?,
+        identity: None,
+    };
+    let workspace_path =
+        create_workspace_locked_with_hook(home, backend, name, from, from_revset, |_, jj| {
+            if let Some(jj) = jj {
+                jj.preflight_runtime_mount()?;
+            }
+            if runtime_transaction_path(home, name).exists() {
+                bail!("runtime create transaction already exists for workspace: {name}");
+            }
+            write_runtime_transaction(home, &transaction)?;
+            injected_crash("create-intent");
+            Ok(())
+        })?;
     let metadata = match read_metadata(&state_dir(home, name)) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -167,39 +358,6 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
             return Err(error.context("jj runtime mount validation failed"));
         }
     };
-    let runtime = match BoxLiteRuntimeBackend::new(home) {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            destroy_workspace_locked(home, backend, name, false).with_context(|| {
-                format!("runtime initialization failed ({error:#}); workspace rollback failed")
-            })?;
-            return Err(error);
-        }
-    };
-    let attempt_path = state_dir(home, name).join("runtime-attempt");
-    if let Err(error) = write_runtime_attempt(&attempt_path, &provider_name) {
-        if error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::AlreadyExists)
-        {
-            return Err(error.context("existing runtime attempt reservation retained"));
-        }
-        destroy_workspace_locked(home, backend, name, false).with_context(|| {
-            format!("runtime attempt reservation failed ({error:#}); workspace rollback failed")
-        })?;
-        return Err(error);
-    }
-    match runtime.find(&provider_name).await {
-        Ok(None) => {}
-        Ok(Some(_)) => {
-            bail!("runtime create attempt token unexpectedly already exists; workspace retained")
-        }
-        Err(error) => {
-            return Err(
-                error.context("could not preflight runtime create attempt; workspace retained")
-            )
-        }
-    }
     let mut runtime_spec = RuntimeSpec::new(image.clone())
         .with_workspace(workspace_path.clone())
         .with_name(provider_name.clone());
@@ -220,6 +378,18 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
             return Err(error);
         }
     };
+    injected_crash("provider-created");
+    transaction.identity = Some(identity.clone());
+    if let Err(error) = write_runtime_transaction(home, &transaction) {
+        if let Err(cleanup) =
+            rollback_created_runtime(home, backend, name, &runtime, &identity).await
+        {
+            return Err(error.context(format!(
+                "could not persist provider identity and rollback failed ({cleanup:#})"
+            )));
+        }
+        return Err(error);
+    }
 
     if let Err(error) = runtime.start(&identity).await {
         if let Err(cleanup) =
@@ -232,6 +402,7 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
         }
         return Err(error);
     }
+    injected_crash("provider-started");
 
     let state_dir = state_dir(home, name);
     let mut metadata = match read_metadata(&state_dir) {
@@ -264,7 +435,9 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
         }
         return Err(error);
     }
-    fs::remove_file(attempt_path).context("could not clear completed runtime create attempt")?;
+    injected_crash("metadata-published");
+    clear_runtime_transaction(home, name)
+        .context("workspace committed but runtime create transaction could not be cleared")?;
     Ok(workspace_path)
 }
 
@@ -292,37 +465,6 @@ fn runtime_attempt_name_with(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok(format!("pando-{workspace_name}-{token}"))
-}
-
-#[cfg(feature = "microvm-boxlite")]
-fn write_runtime_attempt(path: &Path, provider_name: &str) -> Result<()> {
-    use std::io::Write;
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(path).with_context(|| {
-        format!(
-            "could not exclusively reserve runtime attempt {}",
-            path.display()
-        )
-    })?;
-    if let Err(error) = file
-        .write_all(provider_name.as_bytes())
-        .and_then(|()| file.sync_all())
-    {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err(error.into());
-    }
-    let parent_path = path
-        .parent()
-        .context("runtime attempt path has no parent")?;
-    fs::File::open(parent_path)?.sync_all()?;
-    Ok(())
 }
 
 #[cfg(feature = "microvm-boxlite")]
@@ -376,12 +518,13 @@ pub async fn execute_in_workspace(
 
     validate_name(name)?;
     let _lock = acquire_runtime_lock(home).await?;
+    let runtime = BoxLiteRuntimeBackend::new(home)?;
+    recover_platform_runtime_transactions(home, &runtime).await?;
     let metadata = read_metadata(&state_dir(home, name))
         .with_context(|| format!("workspace not found: {name}"))?;
     let runtime_metadata = metadata
         .runtime
         .ok_or_else(|| anyhow::anyhow!("workspace has no runtime: {name}"))?;
-    let runtime = BoxLiteRuntimeBackend::new(home)?;
     let command = if terminal {
         RuntimeCommand::terminal(arguments)
     } else {
@@ -396,11 +539,12 @@ pub async fn stop_workspace_runtime(home: &Path, name: &str) -> Result<()> {
 
     validate_name(name)?;
     let _lock = acquire_runtime_lock(home).await?;
+    let runtime = BoxLiteRuntimeBackend::new(home)?;
+    recover_platform_runtime_transactions(home, &runtime).await?;
     let metadata = read_metadata(&state_dir(home, name))?;
     let runtime_metadata = metadata
         .runtime
         .ok_or_else(|| anyhow::anyhow!("workspace has no runtime: {name}"))?;
-    let runtime = BoxLiteRuntimeBackend::new(home)?;
     runtime.stop(&runtime_metadata.identity).await?;
     Ok(())
 }
@@ -414,14 +558,14 @@ pub async fn inspect_workspace_runtime(
 
     validate_name(name)?;
     let _lock = acquire_runtime_lock(home).await?;
+    let runtime = BoxLiteRuntimeBackend::new(home)?;
+    recover_platform_runtime_transactions(home, &runtime).await?;
     let metadata = read_metadata(&state_dir(home, name))
         .with_context(|| format!("workspace not found: {name}"))?;
     let Some(runtime_metadata) = metadata.runtime.clone() else {
         return Ok((metadata, None));
     };
-    let info = BoxLiteRuntimeBackend::new(home)?
-        .inspect(&runtime_metadata.identity)
-        .await?;
+    let info = runtime.inspect(&runtime_metadata.identity).await?;
     Ok((metadata, Some(info)))
 }
 
@@ -437,26 +581,25 @@ pub async fn destroy_workspace_with_runtime<B: CowBackend>(
     validate_name(name)?;
     let _lock = acquire_runtime_lock(home).await?;
     ensure_home(home)?;
-    let state_dir = state_dir(home, name);
-    let mut metadata = read_metadata(&state_dir)?;
-    let runtime_metadata = metadata
-        .runtime
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("workspace has no runtime: {name}"))?;
     let runtime = BoxLiteRuntimeBackend::new(home)?;
-    destroy_runtime_locked(
-        backend,
-        &runtime,
-        &mut metadata,
-        RuntimeRemoval {
-            home,
-            name,
-            keep_jj_workspace,
-            runtime: &runtime_metadata,
-        },
-        write_metadata,
-    )
-    .await
+    recover_runtime_transactions(home, backend, &runtime).await?;
+    let state_dir = state_dir(home, name);
+    let metadata = read_metadata(&state_dir)?;
+    if let Some(runtime_metadata) = metadata.runtime.as_ref() {
+        destroy_runtime_locked(
+            backend,
+            &runtime,
+            RuntimeRemoval {
+                home,
+                name,
+                keep_jj_workspace,
+                runtime: runtime_metadata,
+            },
+        )
+        .await
+    } else {
+        destroy_workspace_storage_locked(home, backend, name, keep_jj_workspace, true)
+    }
 }
 
 #[cfg(feature = "microvm-boxlite")]
@@ -468,36 +611,31 @@ struct RuntimeRemoval<'a> {
 }
 
 #[cfg(feature = "microvm-boxlite")]
-async fn destroy_runtime_locked<B, R, W>(
+async fn destroy_runtime_locked<B, R>(
     backend: &B,
     runtime: &R,
-    metadata: &mut Metadata,
     removal: RuntimeRemoval<'_>,
-    write: W,
 ) -> Result<()>
 where
     B: CowBackend,
     R: crate::runtime::RuntimeBackend,
-    W: Fn(&Path, &Metadata) -> Result<()>,
 {
-    let state_dir = state_dir(removal.home, removal.name);
     if runtime
         .contains(&removal.runtime.identity)
         .await
         .context("could not authoritatively reconcile runtime identity before removal")?
     {
         runtime.stop(&removal.runtime.identity).await?;
+        injected_crash("remove-stopped");
         runtime.remove(&removal.runtime.identity).await?;
+        injected_crash("remove-provider-removed");
     }
-    metadata.runtime = None;
-    write(&state_dir, metadata).context(
-        "runtime was removed; metadata publication failed, so removal can be retried safely",
-    )?;
-    destroy_workspace_locked(
+    destroy_workspace_storage_locked(
         removal.home,
         backend,
         removal.name,
         removal.keep_jj_workspace,
+        false,
     )
 }
 
@@ -517,6 +655,7 @@ fn forget_registered_jj_workspace(state_dir: &Path) -> Result<()> {
 }
 
 pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
+    let transactions = crate::metadata::runtime_transaction_directories(home)?;
     let state_root = state_root(home);
     if !state_root.exists() {
         return Ok(Vec::new());
@@ -526,6 +665,12 @@ pub fn list_workspaces(home: &Path) -> Result<Vec<Metadata>> {
     for entry in fs::read_dir(state_root)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
+            if transactions
+                .iter()
+                .any(|transaction| transaction.name() == entry.file_name().to_string_lossy())
+            {
+                continue;
+            }
             if let Ok(item) = read_metadata(&entry.path()) {
                 metadata.push(item);
             }
@@ -540,11 +685,14 @@ mod tests {
     use super::{create_workspace, destroy_workspace, list_workspaces};
     #[cfg(feature = "microvm-boxlite")]
     use super::{create_workspace_with_runtime, destroy_workspace_with_runtime};
+    #[cfg(feature = "microvm-boxlite")]
+    use crate::metadata::runtime_transaction_path;
     use crate::{
         backend::SimpleCowBackend,
         home::{state_dir, workspace_dir},
         metadata::{
-            metadata_path, read_metadata, write_metadata, JjMetadata, Metadata, RuntimeMetadata,
+            metadata_path, read_metadata, write_metadata, write_runtime_transaction, JjMetadata,
+            Metadata, RuntimeCreateTransaction, RuntimeMetadata,
         },
         runtime::RuntimeIdentity,
     };
@@ -578,6 +726,32 @@ mod tests {
         destroy_workspace(home.path(), &backend, "demo", false).unwrap();
         assert!(!state_dir.exists());
         assert!(list_workspaces(home.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn provisional_runtime_workspace_is_hidden_and_host_destroy_fails_closed() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("README.md"), "demo").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let backend = SimpleCowBackend;
+        create_workspace(home.path(), &backend, "demo", source.path(), None).unwrap();
+        write_runtime_transaction(
+            home.path(),
+            &RuntimeCreateTransaction {
+                name: "demo".to_owned(),
+                provider_name: "owned-token".to_owned(),
+                image: "alpine:3.22".to_owned(),
+                canonical_root: source.path().to_owned(),
+                identity: None,
+            },
+        )
+        .unwrap();
+
+        assert!(list_workspaces(home.path()).unwrap().is_empty());
+        let error = destroy_workspace(home.path(), &backend, "demo", false).unwrap_err();
+        assert!(error.to_string().contains("incomplete runtime transaction"));
+        assert!(state_dir(home.path(), "demo").exists());
+        assert!(workspace_dir(home.path(), "demo").exists());
     }
 
     #[cfg(feature = "microvm-boxlite")]
@@ -627,22 +801,6 @@ mod tests {
         assert!(!home.path().join("workspaces").exists());
     }
 
-    #[cfg(all(feature = "microvm-boxlite", unix))]
-    #[test]
-    fn runtime_attempt_reservation_is_private_and_exclusive() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let state = tempfile::tempdir().unwrap();
-        let path = state.path().join("runtime-attempt");
-        super::write_runtime_attempt(&path, "attempt-one").unwrap();
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert!(super::write_runtime_attempt(&path, "attempt-two").is_err());
-        assert_eq!(fs::read_to_string(path).unwrap(), "attempt-one");
-    }
-
     #[cfg(feature = "microvm-boxlite")]
     #[tokio::test(flavor = "current_thread")]
     async fn async_runtime_lock_waits_without_blocking_current_thread() {
@@ -659,6 +817,30 @@ mod tests {
             .expect("async lock acquisition deadlocked")
             .unwrap();
         drop(acquired);
+    }
+
+    #[cfg(feature = "microvm-boxlite")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconciled_list_cannot_observe_between_locked_workspace_transitions() {
+        let home = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("README.md"), "demo").unwrap();
+        fs::create_dir_all(home.path().join("state")).unwrap();
+        let held = crate::home::PandoLock::acquire(home.path()).unwrap();
+        let home_path = home.path().to_owned();
+        let waiter = tokio::spawn(async move {
+            super::list_workspaces_reconciled(&home_path, &SimpleCowBackend).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        super::create_workspace_locked(home.path(), &SimpleCowBackend, "demo", source.path(), None)
+            .unwrap();
+        drop(held);
+
+        let listed = waiter.await.unwrap().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "demo");
     }
 
     #[cfg(feature = "microvm-boxlite")]
@@ -731,6 +913,177 @@ mod tests {
         ) -> Result<i32> {
             unreachable!()
         }
+    }
+
+    #[cfg(feature = "microvm-boxlite")]
+    fn provisional_transaction(home: &Path, source: &Path, identity: Option<RuntimeIdentity>) {
+        write_runtime_transaction(
+            home,
+            &RuntimeCreateTransaction {
+                name: "demo".to_owned(),
+                provider_name: "pando-demo-owned-token".to_owned(),
+                image: "alpine:3.22".to_owned(),
+                canonical_root: source.to_owned(),
+                identity,
+            },
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "microvm-boxlite")]
+    #[tokio::test]
+    async fn recovery_removes_only_recorded_identity_and_provisional_storage() {
+        let home = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let state = state_dir(home.path(), "demo");
+        let workspace = workspace_dir(home.path(), "demo");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        write_metadata(
+            &state,
+            &Metadata::new("demo", source.path().to_owned(), workspace.clone()),
+        )
+        .unwrap();
+        provisional_transaction(
+            home.path(),
+            source.path(),
+            Some(RuntimeIdentity::new("owned")),
+        );
+
+        super::recover_runtime_transactions(
+            home.path(),
+            &SimpleCowBackend,
+            &FailingRuntime {
+                stop_fails: true,
+                remove_fails: true,
+                find_identity: Some(RuntimeIdentity::new("unrelated")),
+                find_fails: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!state.exists());
+        assert!(!workspace.exists());
+        assert!(!runtime_transaction_path(home.path(), "demo").exists());
+    }
+
+    #[cfg(feature = "microvm-boxlite")]
+    #[tokio::test]
+    async fn recovery_failure_retains_journal_and_storage_for_retry() {
+        let home = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let state = state_dir(home.path(), "demo");
+        let workspace = workspace_dir(home.path(), "demo");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        write_metadata(
+            &state,
+            &Metadata::new("demo", source.path().to_owned(), workspace.clone()),
+        )
+        .unwrap();
+        provisional_transaction(
+            home.path(),
+            source.path(),
+            Some(RuntimeIdentity::new("owned")),
+        );
+
+        let error = super::recover_runtime_transactions(
+            home.path(),
+            &SimpleCowBackend,
+            &FailingRuntime {
+                stop_fails: true,
+                remove_fails: false,
+                find_identity: Some(RuntimeIdentity::new("owned")),
+                find_fails: false,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ownership proof failure"));
+        assert!(runtime_transaction_path(home.path(), "demo").exists());
+        assert!(state.exists());
+        assert!(workspace.exists());
+    }
+
+    #[cfg(feature = "microvm-boxlite")]
+    #[tokio::test]
+    async fn recovery_removes_attempt_owned_orphan_journal_temp() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join("transactions/demo");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(
+            home.path().join("transactions"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            directory.join(crate::metadata::RUNTIME_TRANSACTION_TEMP_FILE),
+            "partial",
+        )
+        .unwrap();
+        fs::set_permissions(
+            directory.join(crate::metadata::RUNTIME_TRANSACTION_TEMP_FILE),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+
+        super::recover_runtime_transactions(
+            home.path(),
+            &SimpleCowBackend,
+            &FailingRuntime {
+                stop_fails: true,
+                remove_fails: true,
+                find_identity: None,
+                find_fails: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!directory.exists());
+    }
+
+    #[cfg(feature = "microvm-boxlite")]
+    #[tokio::test]
+    async fn recovery_treats_published_runtime_metadata_as_commit_point() {
+        let home = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let state = state_dir(home.path(), "demo");
+        let workspace = workspace_dir(home.path(), "demo");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut metadata = Metadata::new("demo", source.path().to_owned(), workspace.clone());
+        metadata.runtime = Some(RuntimeMetadata {
+            identity: RuntimeIdentity::new("committed"),
+            image: "alpine:3.22".to_owned(),
+        });
+        write_metadata(&state, &metadata).unwrap();
+        provisional_transaction(
+            home.path(),
+            source.path(),
+            Some(RuntimeIdentity::new("committed")),
+        );
+
+        super::recover_runtime_transactions(
+            home.path(),
+            &SimpleCowBackend,
+            &FailingRuntime {
+                stop_fails: true,
+                remove_fails: true,
+                find_identity: None,
+                find_fails: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(state.exists());
+        assert!(workspace.exists());
+        assert!(!runtime_transaction_path(home.path(), "demo").exists());
     }
 
     #[cfg(feature = "microvm-boxlite")]
@@ -808,7 +1161,7 @@ mod tests {
 
     #[cfg(feature = "microvm-boxlite")]
     #[tokio::test]
-    async fn post_provider_persistence_failure_retries_without_touching_absent_provider() {
+    async fn confirmed_absent_provider_allows_storage_cleanup_without_metadata_transition() {
         let home = tempfile::tempdir().unwrap();
         let state_dir = state_dir(home.path(), "demo");
         let workspace_path = workspace_dir(home.path(), "demo");
@@ -822,28 +1175,6 @@ mod tests {
         write_metadata(&state_dir, &metadata).unwrap();
         let destroys = Arc::new(AtomicUsize::new(0));
 
-        let error = super::destroy_runtime_locked(
-            &DestroyCountingBackend(Arc::clone(&destroys)),
-            &FailingRuntime {
-                stop_fails: false,
-                remove_fails: false,
-                find_identity: Some(runtime_metadata.identity.clone()),
-                find_fails: false,
-            },
-            &mut metadata,
-            super::RuntimeRemoval {
-                home: home.path(),
-                name: "demo",
-                keep_jj_workspace: false,
-                runtime: &runtime_metadata,
-            },
-            |_, _| anyhow::bail!("injected metadata failure"),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("metadata publication failed"));
-        assert_eq!(destroys.load(Ordering::SeqCst), 0);
-
         super::destroy_runtime_locked(
             &DestroyCountingBackend(Arc::clone(&destroys)),
             &FailingRuntime {
@@ -852,14 +1183,12 @@ mod tests {
                 find_identity: None,
                 find_fails: false,
             },
-            &mut metadata,
             super::RuntimeRemoval {
                 home: home.path(),
                 name: "demo",
                 keep_jj_workspace: false,
                 runtime: &runtime_metadata,
             },
-            write_metadata,
         )
         .await
         .unwrap();
@@ -878,6 +1207,7 @@ mod tests {
         fs::create_dir_all(&workspace_path).unwrap();
         let mut metadata = Metadata::new("demo", home.path().to_owned(), workspace_path);
         metadata.runtime = Some(runtime_metadata.clone());
+        write_metadata(&state_dir(home.path(), "demo"), &metadata).unwrap();
         let destroys = Arc::new(AtomicUsize::new(0));
         let error = super::destroy_runtime_locked(
             &DestroyCountingBackend(Arc::clone(&destroys)),
@@ -887,20 +1217,21 @@ mod tests {
                 find_identity: None,
                 find_fails: true,
             },
-            &mut metadata,
             super::RuntimeRemoval {
                 home: home.path(),
                 name: "demo",
                 keep_jj_workspace: false,
                 runtime: &runtime_metadata,
             },
-            write_metadata,
         )
         .await
         .unwrap_err();
         assert!(error.to_string().contains("authoritatively reconcile"));
         assert_eq!(destroys.load(Ordering::SeqCst), 0);
-        assert!(metadata.runtime.is_some());
+        assert!(read_metadata(&state_dir(home.path(), "demo"))
+            .unwrap()
+            .runtime
+            .is_some());
     }
 
     #[cfg(feature = "microvm-boxlite")]

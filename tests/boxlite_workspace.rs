@@ -1,6 +1,7 @@
 #![cfg(feature = "microvm-boxlite")]
 
 use std::{
+    collections::BTreeSet,
     fs,
     io::{Read, Write},
     os::fd::{AsRawFd, FromRawFd},
@@ -169,6 +170,49 @@ fn non_jj_and_native_jj_workspaces_run_tools_and_preserve_isolation() {
         .unwrap();
     assert_eq!(failure.status.code(), Some(23));
 
+    for (name, point) in [
+        ("crash-temp-create", "journal-temp-created"),
+        ("crash-temp-write", "journal-temp-written"),
+        ("crash-journal", "journal-published"),
+        ("crash-intent", "create-intent"),
+        ("crash-provider", "provider-created"),
+        ("crash-start", "provider-started"),
+    ] {
+        assert_provisional_create_recovers(&home, &source, name, point, 1);
+    }
+
+    for (name, point) in [
+        ("crash-clean-file", "journal-cleanup-published-unlinked"),
+        ("crash-clean-temp", "journal-cleanup-temp-unlinked"),
+        ("crash-clean-dir", "journal-cleanup-dir-unlinked"),
+    ] {
+        assert_committed_create_recovers(&home, &source, name, point);
+    }
+
+    let interrupted_commit = command(&home, &source)
+        .env("PANDO_TEST_CRASH_POINT", "metadata-published")
+        .args([
+            "create",
+            "crash-commit",
+            "--runtime",
+            "boxlite",
+            "--image",
+            "alpine:3.22",
+        ])
+        .output()
+        .unwrap();
+    assert_sigkill(interrupted_commit);
+    command(&home, &source)
+        .args(["info", "crash-commit"])
+        .assert_success();
+    assert!(home.join("state/crash-commit/meta.toml").exists());
+    assert!(!home
+        .join("transactions/crash-commit/runtime-create.toml")
+        .exists());
+    command(&home, &source)
+        .args(["remove", "crash-commit"])
+        .assert_success();
+
     command(&home, &source)
         .args(["remove", "demo"])
         .assert_success();
@@ -224,6 +268,13 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         ])
         .assert_success();
     let workspace = home.join("workspaces/jjdemo");
+    let runtime_info = command(home, &source)
+        .args(["info", "jjdemo", "--json"])
+        .assert_success();
+    let runtime_info: serde_json::Value = serde_json::from_slice(&runtime_info.stdout).unwrap();
+    let box_home = home
+        .join("runtime/boxlite/boxes")
+        .join(runtime_info["runtime"]["provider_id"].as_str().unwrap());
     fs::write(source.join("canonical-after-create.txt"), "host only\n").unwrap();
     let jj_command = "JJ_CONFIG=/workspace/jj-config.toml /workspace/guest-jj";
 
@@ -279,10 +330,36 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         .assert_success();
     assert!(String::from_utf8_lossy(&restarted.stdout).contains("guest change"));
 
+    let interrupted_stop = command(home, &source)
+        .env("PANDO_TEST_CRASH_POINT", "remove-stopped")
+        .args(["remove", "jjdemo"])
+        .output()
+        .unwrap();
+    assert_sigkill(interrupted_stop);
+    assert!(home.join("state/jjdemo/meta.toml").exists());
+    assert!(workspace.exists());
+    let interrupted_remove = command(home, &source)
+        .env("PANDO_TEST_CRASH_POINT", "remove-provider-removed")
+        .args(["remove", "jjdemo"])
+        .output()
+        .unwrap();
+    assert_sigkill(interrupted_remove);
+    assert!(home.join("state/jjdemo/meta.toml").exists());
+    assert!(workspace.exists());
+    let interrupted_forget = command(home, &source)
+        .env("PANDO_TEST_CRASH_POINT", "remove-jj-forgotten")
+        .args(["remove", "jjdemo"])
+        .output()
+        .unwrap();
+    assert_sigkill(interrupted_forget);
+    assert!(home.join("state/jjdemo/meta.toml").exists());
+    assert!(workspace.exists());
     command(home, &source)
         .args(["remove", "jjdemo"])
         .assert_success();
     assert!(!workspace.exists());
+    assert_not_mounted(&workspace);
+    assert_no_owned_processes(&box_home);
     let workspaces = Command::new(&jj)
         .current_dir(&source)
         .args(["workspace", "list"])
@@ -310,7 +387,20 @@ struct WorkspaceCleanup {
 
 impl Drop for WorkspaceCleanup {
     fn drop(&mut self) {
-        for name in ["demo", "jjdemo"] {
+        for name in [
+            "demo",
+            "jjdemo",
+            "crash-commit",
+            "crash-temp-create",
+            "crash-temp-write",
+            "crash-journal",
+            "crash-intent",
+            "crash-provider",
+            "crash-start",
+            "crash-clean-file",
+            "crash-clean-temp",
+            "crash-clean-dir",
+        ] {
             if self.home.join("state").join(name).exists() {
                 let _ = command(&self.home, &self.source)
                     .args(["remove", name])
@@ -319,6 +409,109 @@ impl Drop for WorkspaceCleanup {
         }
     }
 }
+
+#[cfg(unix)]
+fn assert_sigkill(output: Output) {
+    use std::os::unix::process::ExitStatusExt;
+
+    assert_eq!(
+        output.status.signal(),
+        Some(libc::SIGKILL),
+        "expected injected SIGKILL, got {:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_provisional_create_recovers(
+    home: &Path,
+    source: &Path,
+    name: &str,
+    point: &str,
+    expected_boxes: usize,
+) {
+    let interrupted = command(home, source)
+        .env("PANDO_TEST_CRASH_POINT", point)
+        .args([
+            "create",
+            name,
+            "--runtime",
+            "boxlite",
+            "--image",
+            "alpine:3.22",
+        ])
+        .output()
+        .unwrap();
+    assert_sigkill(interrupted);
+    let boxes_root = home.join("runtime/boxlite/boxes");
+    let boxes_before_recovery = box_directories(&boxes_root);
+    let listed = command(home, source).args(["list"]).assert_success();
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains(name));
+    assert!(!home.join("state").join(name).exists());
+    assert!(!home.join("workspaces").join(name).exists());
+    assert!(!home.join("transactions").join(name).exists());
+    assert_eq!(fs::read_dir(&boxes_root).unwrap().count(), expected_boxes);
+    let boxes_after_recovery = box_directories(&boxes_root);
+    for removed in boxes_before_recovery.difference(&boxes_after_recovery) {
+        assert_no_owned_processes(removed);
+    }
+    assert_not_mounted(&home.join("workspaces").join(name));
+}
+
+fn assert_committed_create_recovers(home: &Path, source: &Path, name: &str, point: &str) {
+    let interrupted = command(home, source)
+        .env("PANDO_TEST_CRASH_POINT", point)
+        .args([
+            "create",
+            name,
+            "--runtime",
+            "boxlite",
+            "--image",
+            "alpine:3.22",
+        ])
+        .output()
+        .unwrap();
+    assert_sigkill(interrupted);
+    let listed = command(home, source).args(["list"]).assert_success();
+    assert!(String::from_utf8_lossy(&listed.stdout).contains(name));
+    assert!(home.join("state").join(name).join("meta.toml").exists());
+    assert!(!home.join("transactions").join(name).exists());
+    let info = command(home, source)
+        .args(["info", name, "--json"])
+        .assert_success();
+    let info: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    let box_home = home
+        .join("runtime/boxlite/boxes")
+        .join(info["runtime"]["provider_id"].as_str().unwrap());
+    command(home, source)
+        .args(["remove", name])
+        .assert_success();
+    assert_no_owned_processes(&box_home);
+    assert_not_mounted(&home.join("workspaces").join(name));
+}
+
+fn box_directories(root: &Path) -> BTreeSet<std::path::PathBuf> {
+    fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn assert_not_mounted(path: &Path) {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap();
+    let escaped = path.to_string_lossy().replace(' ', "\\040");
+    assert!(
+        !mountinfo
+            .lines()
+            .any(|line| line.split_whitespace().nth(4) == Some(escaped.as_str())),
+        "mount still exists at {}",
+        path.display()
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn assert_not_mounted(_path: &Path) {}
 
 #[cfg(target_os = "linux")]
 fn assert_no_owned_processes(box_home: &Path) {
