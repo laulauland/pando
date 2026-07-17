@@ -12,6 +12,8 @@ const LEGACY_DEFAULT_RELATIVE_HOME: &str = ".local/state/pando";
 const STATE_DIR: &str = "state";
 const WORKSPACES_DIR: &str = "workspaces";
 const LOCK_FILE: &str = ".lock";
+const RUNTIME_DIR: &str = "runtime";
+const BOXLITE_RUNTIME_DIR: &str = "boxlite";
 
 pub fn pando_home() -> Result<PathBuf> {
     if let Some(value) = env::var_os(PANDO_HOME_ENV) {
@@ -57,6 +59,10 @@ pub fn state_dir(home: &Path, name: &str) -> PathBuf {
 
 pub fn workspace_dir(home: &Path, name: &str) -> PathBuf {
     workspaces_root(home).join(name)
+}
+
+pub fn boxlite_runtime_home(home: &Path) -> PathBuf {
+    home.join(RUNTIME_DIR).join(BOXLITE_RUNTIME_DIR)
 }
 
 pub struct PandoLock {

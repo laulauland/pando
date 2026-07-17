@@ -1,3 +1,4 @@
+use crate::runtime::RuntimeIdentity;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,14 @@ pub struct Metadata {
     pub workspace_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jj: Option<JjMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeMetadata {
+    pub identity: RuntimeIdentity,
+    pub image: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +51,7 @@ impl Metadata {
             canonical_root,
             workspace_path,
             jj: None,
+            runtime: None,
         }
     }
 }
@@ -67,7 +77,10 @@ pub fn read_metadata(state_dir: &Path) -> Result<Metadata> {
 
 #[cfg(test)]
 mod tests {
-    use super::{metadata_path, read_metadata, write_metadata, JjMetadata, Metadata};
+    use super::{
+        metadata_path, read_metadata, write_metadata, JjMetadata, Metadata, RuntimeMetadata,
+    };
+    use crate::runtime::RuntimeIdentity;
     use chrono::{DateTime, Utc};
     use proptest::prelude::*;
     use std::path::{Path, PathBuf};
@@ -93,6 +106,41 @@ mod tests {
         assert_eq!(read.canonical_root, metadata.canonical_root);
         assert_eq!(read.workspace_path, workspace_path);
         assert!(read.jj.is_none());
+        assert!(read.runtime.is_none());
+    }
+
+    #[test]
+    fn reads_metadata_written_before_runtime_support() {
+        let state_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            metadata_path(state_dir.path()),
+            r#"name = "demo"
+created_at = "2025-01-02T03:04:05Z"
+canonical_root = "/source"
+workspace_path = "/workspace"
+"#,
+        )
+        .unwrap();
+
+        let read = read_metadata(state_dir.path()).unwrap();
+        assert!(read.runtime.is_none());
+    }
+
+    #[test]
+    fn round_trips_runtime_identity_and_image() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut metadata = Metadata::new(
+            "demo",
+            state_dir.path().join("source"),
+            state_dir.path().join("workspace"),
+        );
+        metadata.runtime = Some(RuntimeMetadata {
+            identity: RuntimeIdentity::new("box-123"),
+            image: "alpine:3.22".to_owned(),
+        });
+
+        write_metadata(state_dir.path(), &metadata).unwrap();
+        assert_eq!(read_metadata(state_dir.path()).unwrap(), metadata);
     }
 
     fn safe_path_suffix() -> impl Strategy<Value = Vec<String>> {
@@ -146,6 +194,7 @@ mod tests {
                 canonical_root,
                 workspace_path,
                 jj,
+                runtime: None,
             };
 
             write_metadata(&state_dir, &metadata).unwrap();
