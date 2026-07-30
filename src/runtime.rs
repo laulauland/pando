@@ -375,16 +375,17 @@ mod boxlite_backend {
                 .collect();
             if let Some(store) = spec.jj_store.as_ref() {
                 store.revalidate()?;
-                volumes.push(VolumeSpec {
-                    host_path: store
-                        .host_repo_path()
-                        .canonicalize()
-                        .context("could not canonicalize runtime volume")?
-                        .to_string_lossy()
-                        .into_owned(),
-                    guest_path: store.guest_repo_path().to_string_lossy().into_owned(),
-                    read_only: false,
-                });
+                for (host_path, guest_path) in store.volumes() {
+                    volumes.push(VolumeSpec {
+                        host_path: host_path
+                            .canonicalize()
+                            .context("could not canonicalize runtime volume")?
+                            .to_string_lossy()
+                            .into_owned(),
+                        guest_path: guest_path.to_string_lossy().into_owned(),
+                        read_only: false,
+                    });
+                }
             }
             let options = BoxOptions {
                 cpus: Some(spec.policy.cpu_count),

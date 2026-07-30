@@ -55,9 +55,19 @@ pub fn canonical_jj_root(canonical_root: &Path) -> Result<JjCanonicalRoot> {
 
 #[derive(Debug)]
 pub struct JjRuntimeMount {
-    host_repo_path: PathBuf,
-    guest_repo_path: PathBuf,
+    volumes: Vec<JjRuntimeVolume>,
     identity: Vec<PathIdentity>,
+}
+
+#[derive(Debug)]
+pub(crate) struct JjRuntimeVolume {
+    host_path: PathBuf,
+    guest_path: PathBuf,
+}
+
+struct ValidatedGitBackend {
+    host_path: PathBuf,
+    guest_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,11 +79,17 @@ struct PathIdentity {
 
 impl JjRuntimeMount {
     pub fn host_repo_path(&self) -> &Path {
-        &self.host_repo_path
+        &self.volumes[0].host_path
     }
 
     pub fn guest_repo_path(&self) -> &Path {
-        &self.guest_repo_path
+        &self.volumes[0].guest_path
+    }
+
+    pub(crate) fn volumes(&self) -> impl Iterator<Item = (&Path, &Path)> {
+        self.volumes
+            .iter()
+            .map(|volume| (volume.host_path.as_path(), volume.guest_path.as_path()))
     }
 
     pub fn revalidate(&self) -> Result<()> {
@@ -185,50 +201,138 @@ pub fn jj_runtime_mount(
             expected_repo.display()
         );
     }
-    validate_runtime_store(&expected_repo)?;
-
     let mut guest_repo = PathBuf::from("/workspace/.jj");
-    for component in pointer.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                guest_repo.pop();
-            }
-            std::path::Component::Normal(component) => guest_repo.push(component),
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => unreachable!(),
-        }
-    }
+    resolve_guest_relative(&mut guest_repo, pointer)?;
     if guest_repo == Path::new("/") || guest_repo.starts_with("/workspace") {
         bail!("jj workspace repo pointer produces an unsafe guest mount path");
     }
-    let identity = capture_path_identity(&expected_repo)?;
-    Ok(Some(JjRuntimeMount {
-        host_repo_path: expected_repo,
-        guest_repo_path: guest_repo,
-        identity,
-    }))
-}
 
-fn validate_runtime_store(expected_repo: &Path) -> Result<()> {
-    let git_target = expected_repo.join("store/git_target");
-    if git_target.is_file() {
-        let target =
-            fs::read_to_string(&git_target).context("could not read jj git backend target")?;
-        let resolved_target = git_target
-            .parent()
-            .context("jj git backend target has no parent")?
-            .join(target)
-            .canonicalize()
-            .context("could not resolve jj git backend target")?;
-        if !resolved_target.starts_with(expected_repo) {
-            bail!(
-                "jj repository store depends on path outside canonical .jj/repo: {}",
-                resolved_target.display()
-            );
+    let mut volumes = vec![JjRuntimeVolume {
+        host_path: expected_repo.clone(),
+        guest_path: guest_repo.clone(),
+    }];
+    let git_backend = validate_runtime_store(&expected_repo, canonical_root, &guest_repo)?;
+    if let Some(ValidatedGitBackend {
+        host_path: host_git,
+        guest_path: Some(guest_git),
+    }) = git_backend.as_ref()
+    {
+        if guest_git == Path::new("/")
+            || guest_git.starts_with("/workspace")
+            || paths_overlap(&guest_repo, guest_git)
+        {
+            bail!("jj git backend produces an unsafe or overlapping guest mount path");
+        }
+        volumes.push(JjRuntimeVolume {
+            host_path: host_git.clone(),
+            guest_path: guest_git.clone(),
+        });
+    }
+    let mut identity = Vec::new();
+    for volume in &volumes {
+        for item in capture_path_identity(&volume.host_path)? {
+            if !identity.contains(&item) {
+                identity.push(item);
+            }
         }
     }
+    if let Some(backend) = git_backend {
+        for item in capture_path_identity(&backend.host_path)? {
+            if !identity.contains(&item) {
+                identity.push(item);
+            }
+        }
+    }
+    Ok(Some(JjRuntimeMount { volumes, identity }))
+}
 
+fn resolve_guest_relative(destination: &mut PathBuf, relative: &Path) -> Result<()> {
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                destination.pop();
+            }
+            std::path::Component::Normal(component) => destination.push(component),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                bail!("jj path must be relative")
+            }
+        }
+    }
     Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn validate_runtime_store(
+    expected_repo: &Path,
+    canonical_root: &Path,
+    guest_repo: &Path,
+) -> Result<Option<ValidatedGitBackend>> {
+    let git_target = expected_repo.join("store/git_target");
+    match fs::symlink_metadata(&git_target) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                bail!("jj git backend target must be a regular file");
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("could not inspect jj git backend target"),
+    }
+    let target = fs::read_to_string(&git_target).context("could not read jj git backend target")?;
+    if target.is_empty()
+        || target.trim() != target
+        || target.bytes().any(|byte| byte == 0)
+        || Path::new(&target).is_absolute()
+    {
+        bail!("jj git backend target has unsafe or malformed contents");
+    }
+    let target = Path::new(&target);
+    let mut lexical_target = expected_repo.join("store");
+    resolve_guest_relative(&mut lexical_target, target)?;
+    if !lexical_target.starts_with(expected_repo) && lexical_target != canonical_root.join(".git") {
+        bail!(
+            "jj repository store depends on unsupported external path: {}",
+            lexical_target.display()
+        );
+    }
+    let resolved_target = git_target
+        .parent()
+        .context("jj git backend target has no parent")?
+        .join(target)
+        .canonicalize()
+        .context("could not resolve jj git backend target")?;
+    if resolved_target != lexical_target {
+        bail!("jj git backend target traverses a symlink");
+    }
+    if resolved_target.starts_with(expected_repo) {
+        path_identity(&resolved_target)
+            .context("self-contained jj git backend is not a real directory")?;
+        return Ok(Some(ValidatedGitBackend {
+            host_path: resolved_target,
+            guest_path: None,
+        }));
+    }
+
+    let canonical_git = canonical_root.join(".git");
+    path_identity(&canonical_git)?;
+    let canonical_git = canonical_git
+        .canonicalize()
+        .context("could not resolve colocated jj git backend")?;
+    if resolved_target != canonical_git {
+        bail!(
+            "jj repository store depends on unsupported external path: {}",
+            resolved_target.display()
+        );
+    }
+    let mut guest_target = guest_repo.join("store");
+    resolve_guest_relative(&mut guest_target, target)?;
+    Ok(Some(ValidatedGitBackend {
+        host_path: canonical_git,
+        guest_path: Some(guest_target),
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,7 +355,16 @@ impl JjRegistrationPreflight {
     /// Prove the canonical store is self-contained and has stable real-directory ancestors
     /// before a runtime-backed create mutates workspace storage.
     pub fn preflight_runtime_mount(&self) -> Result<()> {
-        validate_runtime_store(&self.repo_path)?;
+        let canonical_root = self
+            .repo_path
+            .parent()
+            .and_then(Path::parent)
+            .context("canonical jj repository has no working-copy root")?;
+        validate_runtime_store(
+            &self.repo_path,
+            canonical_root,
+            Path::new("/preflight/.jj/repo"),
+        )?;
         capture_path_identity(&self.repo_path)?;
         Ok(())
     }
@@ -732,6 +845,58 @@ mod tests {
         mount.revalidate().unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn runtime_mount_adds_standard_colocated_git_backend() {
+        let (_root, workspace, canonical) =
+            pointer_fixture("../../../../canonical space/./.jj/repo");
+        fs::create_dir_all(canonical.join(".jj/repo/store")).unwrap();
+        fs::create_dir(canonical.join(".git")).unwrap();
+        fs::write(canonical.join(".jj/repo/store/git_target"), "../../../.git").unwrap();
+
+        let mount = jj_runtime_mount(&workspace, &canonical).unwrap().unwrap();
+        let volumes = mount.volumes().collect::<Vec<_>>();
+        assert_eq!(
+            volumes,
+            vec![
+                (
+                    canonical.join(".jj/repo").as_path(),
+                    Path::new("/canonical space/.jj/repo")
+                ),
+                (
+                    canonical.join(".git").as_path(),
+                    Path::new("/canonical space/.git")
+                ),
+            ]
+        );
+        mount.revalidate().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_mount_keeps_self_contained_git_backend_inside_repo_mount() {
+        let (_root, workspace, canonical) =
+            pointer_fixture("../../../../canonical space/./.jj/repo");
+        fs::create_dir_all(canonical.join(".jj/repo/store/git")).unwrap();
+        fs::write(canonical.join(".jj/repo/store/git_target"), "git").unwrap();
+
+        let mount = jj_runtime_mount(&workspace, &canonical).unwrap().unwrap();
+        assert_eq!(mount.volumes().count(), 1);
+        mount.revalidate().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_mount_rejects_non_directory_self_contained_git_backend() {
+        let (_root, workspace, canonical) =
+            pointer_fixture("../../../../canonical space/./.jj/repo");
+        fs::create_dir_all(canonical.join(".jj/repo/store")).unwrap();
+        fs::write(canonical.join(".jj/repo/store/git"), "not a git directory").unwrap();
+        fs::write(canonical.join(".jj/repo/store/git_target"), "git").unwrap();
+
+        assert!(jj_runtime_mount(&workspace, &canonical).is_err());
+    }
+
     #[test]
     fn runtime_mount_accepts_non_jj_workspace_without_a_store_mount() {
         let root = tempfile::tempdir().unwrap();
@@ -778,6 +943,40 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn runtime_mount_rejects_symlinked_colocated_git_inputs() {
+        use std::os::unix::fs::symlink;
+
+        let (root, workspace, canonical) = pointer_fixture("../../../../canonical space/.jj/repo");
+        fs::create_dir_all(canonical.join(".jj/repo/store")).unwrap();
+        fs::create_dir(root.path().join("git-target")).unwrap();
+        symlink(root.path().join("git-target"), canonical.join(".git")).unwrap();
+        fs::write(canonical.join(".jj/repo/store/git_target"), "../../../.git").unwrap();
+        assert!(jj_runtime_mount(&workspace, &canonical).is_err());
+
+        fs::remove_file(canonical.join(".git")).unwrap();
+        fs::create_dir(canonical.join(".git")).unwrap();
+        fs::remove_file(canonical.join(".jj/repo/store/git_target")).unwrap();
+        symlink(
+            canonical.join(".git"),
+            canonical.join(".jj/repo/store/git-link"),
+        )
+        .unwrap();
+        fs::write(canonical.join(".jj/repo/store/git_target"), "git-link").unwrap();
+        assert!(jj_runtime_mount(&workspace, &canonical).is_err());
+
+        fs::remove_file(canonical.join(".jj/repo/store/git-link")).unwrap();
+        fs::remove_file(canonical.join(".jj/repo/store/git_target")).unwrap();
+        fs::write(root.path().join("target-file"), "../../../.git").unwrap();
+        symlink(
+            root.path().join("target-file"),
+            canonical.join(".jj/repo/store/git_target"),
+        )
+        .unwrap();
+        assert!(jj_runtime_mount(&workspace, &canonical).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn runtime_mount_revalidation_detects_store_identity_replacement() {
         let (_root, workspace, canonical) = pointer_fixture("../../../../canonical space/.jj/repo");
         let mount = jj_runtime_mount(&workspace, &canonical).unwrap().unwrap();
@@ -787,6 +986,34 @@ mod tests {
         )
         .unwrap();
         fs::create_dir(canonical.join(".jj/repo")).unwrap();
+        assert!(mount.revalidate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_mount_revalidation_detects_colocated_git_replacement() {
+        let (_root, workspace, canonical) = pointer_fixture("../../../../canonical space/.jj/repo");
+        fs::create_dir_all(canonical.join(".jj/repo/store")).unwrap();
+        fs::create_dir(canonical.join(".git")).unwrap();
+        fs::write(canonical.join(".jj/repo/store/git_target"), "../../../.git").unwrap();
+        let mount = jj_runtime_mount(&workspace, &canonical).unwrap().unwrap();
+        fs::rename(canonical.join(".git"), canonical.join(".git-original")).unwrap();
+        fs::create_dir(canonical.join(".git")).unwrap();
+        assert!(mount.revalidate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_mount_revalidation_detects_self_contained_git_replacement() {
+        let (_root, workspace, canonical) =
+            pointer_fixture("../../../../canonical space/./.jj/repo");
+        let git_backend = canonical.join(".jj/repo/store/git");
+        fs::create_dir_all(&git_backend).unwrap();
+        fs::write(canonical.join(".jj/repo/store/git_target"), "git").unwrap();
+        let mount = jj_runtime_mount(&workspace, &canonical).unwrap().unwrap();
+        fs::rename(&git_backend, canonical.join(".jj/repo/store/original-git")).unwrap();
+        fs::create_dir(&git_backend).unwrap();
+
         assert!(mount.revalidate().is_err());
     }
 

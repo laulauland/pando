@@ -62,7 +62,15 @@ BoxLite 0.9.7's Linux virtiofs mount preserves atomic exclusive creation, direct
 
 Runtime-enabled binaries are currently experimental CI artifacts, not GitHub release, Homebrew, install-script, or mise artifacts. The [runtime packaging record](docs/runtime-packaging.md) documents platform status, artifact naming, measured size/build cost, embedded native assets, licensing and reproducibility blockers, and the future external executor seam.
 
-For native `jj` workspaces, Pando also mounts only the canonical `.jj/repo` store read-write at the guest path selected by the workspace's unchanged relative `.jj/repo` pointer. The canonical working copy is not mounted. Pando validates that pointer against the recorded canonical store before creating the VM; absolute, malformed, mismatched, overlapping, and externally backed store layouts fail closed. In particular, this stage supports self-contained/non-colocated jj repositories; a colocated Git backend depends on the canonical `.git` outside `.jj/repo` and is rejected rather than exposing it.
+For native `jj` workspaces, Pando mounts the canonical `.jj/repo` store
+read-write at the guest path selected by the workspace's unchanged relative
+`.jj/repo` pointer. Standard colocated repositories are supported too: Pando
+additionally mounts the canonical `.git` directory read-write at the exact
+destination selected by the store's unchanged `git_target` pointer. The
+canonical working-copy files are never mounted. Pando validates both pointers,
+their destinations, and every directory identity before and after provider
+creation; absolute, malformed, mismatched, symlinked, overlapping, and
+externally backed layouts fail closed.
 
 Names cannot contain whitespace or path separators. `--from` takes a `jj` revset that must resolve to exactly one commit; it is silently ignored when the source is not a `jj` repository. With no `--from`, the new workspace is based on the canonical workspace's `@-`.
 

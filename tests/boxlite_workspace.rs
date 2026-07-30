@@ -310,7 +310,7 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
     let source = fixture.join("jj source with spaces");
     let jj = host_jj_binary();
     let initialized = Command::new(&jj)
-        .args(["git", "init", "--no-colocate"])
+        .args(["git", "init"])
         .arg(&source)
         .output()
         .unwrap();
@@ -334,7 +334,6 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         .current_dir(&source)
         .args(["new"])
         .assert_success();
-
     let mut create_jjdemo = command(home, &source);
     create_jjdemo.args([
         "create",
@@ -355,6 +354,13 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         .join("runtime/boxlite/boxes")
         .join(runtime_info["runtime"]["provider_id"].as_str().unwrap());
     fs::write(source.join("canonical-after-create.txt"), "host only\n").unwrap();
+    Command::new(&jj)
+        .current_dir(&source)
+        .args(["status"])
+        .assert_success();
+    let canonical_head = fs::read(source.join(".git/HEAD")).unwrap();
+    let canonical_index = fs::read(source.join(".git/index")).ok();
+    let canonical_tracked = fs::read(source.join("tracked.txt")).unwrap();
     let jj_command = "JJ_CONFIG=/workspace/jj-config.toml /workspace/guest-jj";
 
     let root = command(home, &source)
@@ -380,6 +386,27 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
             ),
         ])
         .assert_success();
+    command(home, &source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "{jj_command} bookmark create pando-guest-check -r @- && {jj_command} bookmark list pando-guest-check | grep pando-guest-check"
+            ),
+        ])
+        .assert_success();
+    let host_bookmark = Command::new(&jj)
+        .current_dir(&source)
+        .args(["bookmark", "list", "pando-guest-check"])
+        .assert_success();
+    assert!(
+        String::from_utf8_lossy(&host_bookmark.stdout).contains("pando-guest-check"),
+        "host did not observe guest bookmark: {}",
+        String::from_utf8_lossy(&host_bookmark.stdout)
+    );
     assert_eq!(
         fs::read_to_string(workspace.join("tracked.txt")).unwrap(),
         "guest edit\n"
@@ -394,6 +421,19 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         .assert_success();
     assert!(String::from_utf8_lossy(&host_log.stdout).contains("guest change"));
     let qualified_change = run_concurrent_jj_qualification(&jj, home, &source, jj_command);
+    run_seeded_concurrent_jj_stress(&jj, home, &source, jj_command);
+    run_stale_workspace_recovery(&jj, home, &source, jj_command);
+    verify_colocated_repository_integrity(&jj, home, &source, jj_command);
+    assert_eq!(fs::read(source.join(".git/HEAD")).unwrap(), canonical_head);
+    assert_eq!(fs::read(source.join(".git/index")).ok(), canonical_index);
+    assert_eq!(
+        fs::read(source.join("tracked.txt")).unwrap(),
+        canonical_tracked
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("canonical-after-create.txt")).unwrap(),
+        "host only\n"
+    );
 
     command(home, &source)
         .args(["stop", "jjdemo"])
@@ -451,6 +491,270 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         fs::read_to_string(source.join("tracked.txt")).unwrap(),
         "canonical\n"
     );
+}
+
+fn run_stale_workspace_recovery(jj: &Path, home: &Path, source: &Path, jj_command: &str) {
+    command(home, source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!("{jj_command} new 'root()' -m 'stale recovery baseline'"),
+        ])
+        .assert_success();
+    Command::new(jj)
+        .current_dir(source)
+        .args(["log", "-r", "all()", "--no-graph", "-T", "commit_id"])
+        .assert_success();
+    let guest_change = command(home, source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!("{jj_command} log -r @ --no-graph -T commit_id"),
+        ])
+        .assert_success();
+    let guest_change = String::from_utf8(guest_change.stdout).unwrap();
+    let stale_source = source.parent().unwrap().join("stale source workspace");
+    Command::new(jj)
+        .current_dir(source)
+        .args([
+            "workspace",
+            "add",
+            stale_source.to_str().unwrap(),
+            "--name",
+            "pando-stale-source",
+            "--revision",
+            "root()",
+        ])
+        .assert_success();
+    fs::write(stale_source.join("host-added-to-stale-target"), "host\n").unwrap();
+    Command::new(jj)
+        .current_dir(&stale_source)
+        .args(["describe", "-m", "stale source tree change"])
+        .assert_success();
+    let stale_source_commit = Command::new(jj)
+        .current_dir(&stale_source)
+        .args(["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+        .assert_success();
+    let stale_source_commit = String::from_utf8(stale_source_commit.stdout).unwrap();
+    Command::new(jj)
+        .current_dir(source)
+        .args([
+            "--ignore-working-copy",
+            "squash",
+            "--from",
+            stale_source_commit.trim(),
+            "--into",
+            guest_change.trim(),
+            "-m",
+            "host rewrite requiring guest refresh",
+        ])
+        .assert_success();
+
+    let stale = command(home, source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!("{jj_command} --config snapshot.auto-update-stale=false status"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !stale.status.success()
+            && String::from_utf8_lossy(&stale.stderr)
+                .to_ascii_lowercase()
+                .contains("stale"),
+        "expected a classified stale-workspace response, got status {:?}, stdout {}, stderr {}",
+        stale.status,
+        String::from_utf8_lossy(&stale.stdout),
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    command(home, source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!("{jj_command} workspace update-stale && {jj_command} status"),
+        ])
+        .assert_success();
+    Command::new(jj)
+        .current_dir(source)
+        .args(["workspace", "forget", "pando-stale-source"])
+        .assert_success();
+    fs::remove_dir_all(stale_source).unwrap();
+}
+
+fn verify_colocated_repository_integrity(jj: &Path, home: &Path, source: &Path, jj_command: &str) {
+    Command::new("git")
+        .current_dir(source)
+        .args(["fsck", "--strict"])
+        .assert_success();
+    Command::new(jj)
+        .current_dir(source)
+        .args(["debug", "index"])
+        .assert_success();
+    Command::new(jj)
+        .current_dir(source)
+        .args(["op", "log", "--no-graph", "-n", "40"])
+        .assert_success();
+    command(home, source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "{jj_command} debug index && {jj_command} op log --no-graph -n 40 && {jj_command} log -r 'all()' --no-graph -T commit_id"
+            ),
+        ])
+        .assert_success();
+}
+
+fn run_seeded_concurrent_jj_stress(jj: &Path, home: &Path, source: &Path, jj_command: &str) {
+    const SEED: u64 = 0x5041_4e44_4f43_4f57;
+    const ROUNDS: usize = 8;
+
+    let original = Command::new(jj)
+        .current_dir(source)
+        .args(["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+        .assert_success();
+    let original = String::from_utf8(original.stdout).unwrap();
+    let mut targets = Vec::with_capacity(ROUNDS * 2);
+    for index in 0..ROUNDS * 2 {
+        Command::new(jj)
+            .current_dir(source)
+            .args([
+                "new",
+                "root()",
+                "-m",
+                &format!("stress target seed={SEED:#x} index={index}"),
+            ])
+            .assert_success();
+        let target = Command::new(jj)
+            .current_dir(source)
+            .args(["log", "-r", "@", "--no-graph", "-T", "change_id"])
+            .assert_success();
+        targets.push(String::from_utf8(target.stdout).unwrap().trim().to_owned());
+    }
+    Command::new(jj)
+        .current_dir(source)
+        .args(["edit", original.trim()])
+        .assert_success();
+
+    let mut state = SEED;
+    for round in 0..ROUNDS {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let pair = if state & 1 == 0 {
+            [round * 2, round * 2 + 1]
+        } else {
+            [round * 2 + 1, round * 2]
+        };
+        let host_target = targets[pair[0]].clone();
+        let guest_target = targets[pair[1]].clone();
+        let host_jj = jj.to_owned();
+        let host_source = source.to_owned();
+        let host = std::thread::spawn(move || {
+            Command::new(host_jj)
+                .current_dir(host_source)
+                .args([
+                    "describe",
+                    "-r",
+                    &host_target,
+                    "-m",
+                    &format!("stress host seed={SEED:#x} round={round}"),
+                ])
+                .output()
+                .unwrap()
+        });
+        let guest_home = home.to_owned();
+        let guest_source = source.to_owned();
+        let guest_command = jj_command.to_owned();
+        let guest = std::thread::spawn(move || {
+            command(&guest_home, &guest_source)
+                .args([
+                    "exec",
+                    "jjdemo",
+                    "--",
+                    "sh",
+                    "-c",
+                    &format!(
+                        "{guest_command} describe -r '{guest_target}' -m 'stress guest seed={SEED:#x} round={round}'"
+                    ),
+                ])
+                .output()
+                .unwrap()
+        });
+        let host = host.join().unwrap();
+        let guest = guest.join().unwrap();
+        assert!(
+            host.status.success(),
+            "host jj stress failure (seed={SEED:#x}, round={round}): {}",
+            String::from_utf8_lossy(&host.stderr)
+        );
+        assert!(
+            guest.status.success(),
+            "guest jj stress failure (seed={SEED:#x}, round={round}): {}",
+            String::from_utf8_lossy(&guest.stderr)
+        );
+        for (target, expected) in [
+            (
+                &targets[pair[0]],
+                format!("stress host seed={SEED:#x} round={round}\n"),
+            ),
+            (
+                &targets[pair[1]],
+                format!("stress guest seed={SEED:#x} round={round}\n"),
+            ),
+        ] {
+            let observed = Command::new(jj)
+                .current_dir(source)
+                .args(["log", "-r", target, "--no-graph", "-T", "description"])
+                .assert_success();
+            assert_eq!(
+                String::from_utf8(observed.stdout).unwrap(),
+                expected,
+                "concurrent mutation was lost (seed={SEED:#x}, round={round}, target={target})"
+            );
+        }
+    }
+
+    Command::new(jj)
+        .current_dir(source)
+        .args(["status"])
+        .assert_success();
+    Command::new(jj)
+        .current_dir(source)
+        .args(["log", "-r", "all()", "--no-graph", "-T", "commit_id"])
+        .assert_success();
+    Command::new(jj)
+        .current_dir(source)
+        .args(["op", "log", "--no-graph", "-n", "40"])
+        .assert_success();
+    command(home, source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "{jj_command} workspace update-stale && {jj_command} status && {jj_command} op log --no-graph -n 40"
+            ),
+        ])
+        .assert_success();
 }
 
 fn run_concurrent_jj_qualification(
