@@ -132,7 +132,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let mut sorted = samples_ms.clone();
     sorted.sort_by(f64::total_cmp);
-    let median_ms = if samples % 2 == 0 {
+    let median_ms = if samples.is_multiple_of(2) {
         (sorted[samples / 2 - 1] + sorted[samples / 2]) / 2.0
     } else {
         sorted[samples / 2]

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: $0 OUTPUT" >&2
+  exit 2
+fi
+
+url="https://github.com/boxlite-ai/boxlite/releases/download/v0.9.7/boxlite-runtime-v0.9.7-linux-x64-gnu.tar.gz"
+expected="9ae495f55d363e6af04640ab55025ac80b4bf4762e38fa0b8ac80c7604e3148c"
+output="$1"
+
+curl -fsSL "$url" -o "$output"
+actual="$(sha256sum "$output" | cut -d' ' -f1)"
+if [ "$actual" != "$expected" ]; then
+  echo "BoxLite runtime checksum mismatch: expected $expected, got $actual" >&2
+  exit 1
+fi

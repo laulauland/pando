@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: $0 OUTPUT.tar.gz" >&2
+  exit 2
+fi
+
+output="$1"
+bundle="$(mktemp -d /tmp/pando-boxlite-sources.XXXXXX)"
+trap 'rm -rf "$bundle"' EXIT
+
+fetch() {
+  local name="$1"
+  local url="$2"
+  local expected="$3"
+  curl -fsSL "$url" -o "$bundle/$name.tar.gz"
+  local actual
+  actual="$(sha256sum "$bundle/$name.tar.gz" | cut -d' ' -f1)"
+  if [ "$actual" != "$expected" ]; then
+    echo "$name source checksum mismatch: expected $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
+fetch boxlite-88038340 https://github.com/boxlite-ai/boxlite/archive/8803834036205cf2cac5cfca98bb3875812c897a.tar.gz f23e046a263ab88356f5c6a03bc5d3e3559d40ec82d73b0983d0f76cd2781f98
+fetch bubblewrap-9ca3b05e https://github.com/containers/bubblewrap/archive/9ca3b05ec787acfb4b17bed37db5719fa777834f.tar.gz 552cec9c79bb85c8ecd25ae3e55efca9af03390c17d829885ee45722dedada4f
+fetch e2fsprogs-da631e11 https://github.com/tytso/e2fsprogs/archive/da631e117dcf8797bfda0f48bdaa05ac0fbcf7af.tar.gz 86360777b8e0832f3fcbfc11e333a7a0e9df15ca3b67a8072fcb93d97a2b8ab9
+fetch libkrun-e12b9b37 https://github.com/boxlite-ai/libkrun/archive/e12b9b3780ffa8df9f3e1797b217d13453479167.tar.gz 6350384f3e2febc13796237cde88df5baa5f67a3dac6323bb7ec924fa9edcbfa
+fetch libkrunfw-fad43a12 https://github.com/boxlite-ai/libkrunfw/archive/fad43a12d689586b4cb46110efc1d2a0f20b5361.tar.gz 8eb9e6d870d2e63c899b18e15d3296922315ae81b57e4f2c4b5a3ccb29fbe304
+cp THIRD_PARTY_NOTICES.md "$bundle/"
+tar czf "$output" -C "$bundle" .

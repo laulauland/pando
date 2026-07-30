@@ -86,6 +86,7 @@ impl JjRuntimeMount {
         &self.volumes[0].guest_path
     }
 
+    #[cfg(any(test, feature = "microvm-boxlite"))]
     pub(crate) fn volumes(&self) -> impl Iterator<Item = (&Path, &Path)> {
         self.volumes
             .iter()

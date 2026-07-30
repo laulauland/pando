@@ -1,8 +1,14 @@
+#[cfg(all(feature = "microvm-boxlite", target_os = "linux"))]
+use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+#[cfg(all(feature = "microvm-boxlite", target_os = "linux"))]
+use std::path::Path;
 use std::{future::Future, path::PathBuf};
 
 pub const GUEST_WORKSPACE_PATH: &str = "/workspace";
+#[cfg(feature = "microvm-boxlite")]
+const GUEST_JJ_STAGE_PATH: &str = "/workspace/.jj/pando-tools-stage/jj";
 pub const DEFAULT_CPU_COUNT: u8 = 2;
 pub const DEFAULT_MEMORY_MIB: u32 = 512;
 
@@ -159,6 +165,8 @@ pub struct RuntimeSpec {
     policy: RuntimePolicy,
     #[cfg(feature = "microvm-boxlite")]
     jj_store: Option<crate::jj::JjRuntimeMount>,
+    #[cfg(feature = "microvm-boxlite")]
+    guest_jj_stage: Option<PathBuf>,
 }
 
 impl RuntimeSpec {
@@ -170,6 +178,8 @@ impl RuntimeSpec {
             policy: RuntimePolicy::default(),
             #[cfg(feature = "microvm-boxlite")]
             jj_store: None,
+            #[cfg(feature = "microvm-boxlite")]
+            guest_jj_stage: None,
         }
     }
 
@@ -202,6 +212,55 @@ impl RuntimeSpec {
         self.jj_store = Some(store);
         self
     }
+
+    #[cfg(feature = "microvm-boxlite")]
+    pub(crate) fn with_guest_jj_stage(mut self, path: PathBuf) -> Self {
+        debug_assert!(self.workspace_path.is_some());
+        self.guest_jj_stage = Some(path);
+        self
+    }
+}
+
+#[cfg(all(feature = "microvm-boxlite", target_os = "linux"))]
+pub(crate) fn prepare_guest_jj_stage(workspace_root: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join("jj"))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| anyhow::anyhow!("jj is required on PATH for a jj-backed Linux runtime"))?
+        .canonicalize()
+        .context("could not canonicalize host jj executable")?;
+    let metadata = source
+        .metadata()
+        .context("could not inspect host jj executable")?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        anyhow::bail!(
+            "host jj path is not an executable regular file: {}",
+            source.display()
+        );
+    }
+
+    stage_guest_jj(&source, workspace_root)
+}
+
+#[cfg(all(feature = "microvm-boxlite", target_os = "linux"))]
+fn stage_guest_jj(source: &Path, workspace_root: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let stage_dir = workspace_root.join(".jj/pando-tools-stage");
+    std::fs::create_dir_all(&stage_dir)
+        .context("could not create Pando guest jj staging directory")?;
+    let destination = stage_dir.join("jj");
+    let temporary = stage_dir.join(format!("jj.tmp-{}", std::process::id()));
+    std::fs::copy(source, &temporary).context("could not copy jj into Pando guest tools")?;
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o555))
+        .context("could not seal Pando guest jj permissions")?;
+    std::fs::rename(&temporary, &destination)
+        .context("could not publish Pando guest jj executable")?;
+    Ok(stage_dir)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,7 +328,7 @@ pub trait RuntimeBackend {
 mod boxlite_backend {
     use super::{
         RuntimeBackend, RuntimeCommand, RuntimeIdentity, RuntimeInfo, RuntimeSpec, RuntimeStatus,
-        GUEST_WORKSPACE_PATH,
+        GUEST_JJ_STAGE_PATH, GUEST_WORKSPACE_PATH,
     };
     use crate::home::boxlite_runtime_home;
     use anyhow::{anyhow, bail, Context, Result};
@@ -349,6 +408,9 @@ mod boxlite_backend {
             if spec.jj_store.is_some() && spec.workspace_path.is_none() {
                 bail!("invalid runtime topology: jj store requires /workspace");
             }
+            if spec.guest_jj_stage.is_some() && spec.workspace_path.is_none() {
+                bail!("invalid runtime topology: guest jj staging requires /workspace");
+            }
             let mut advanced = boxlite::AdvancedBoxOptions::default();
             // BoxLite 0.9.7's bundled filter kills libkrun with SIGSYS on gondor's
             // Linux 7.1 kernel. Keep the rest of its jailer enabled while the
@@ -404,6 +466,36 @@ mod boxlite_backend {
                 .create(options, spec.name)
                 .await
                 .context("could not create BoxLite runtime")?;
+            if spec.guest_jj_stage.is_some() {
+                let install_script = format!(
+                    "mkdir -p /usr/local/bin && cp {GUEST_JJ_STAGE_PATH} /usr/local/bin/jj.tmp && chmod 0555 /usr/local/bin/jj.tmp && mv /usr/local/bin/jj.tmp /usr/local/bin/jj"
+                );
+                let install = litebox
+                    .exec(BoxCommand::new("sh").args(["-c", &install_script]))
+                    .await
+                    .context("could not start guest jj installation")?;
+                let result = install
+                    .wait()
+                    .await
+                    .context("could not wait for guest jj installation")?;
+                if result.exit_code != 0 {
+                    let cleanup = self.runtime.remove(litebox.id().as_ref(), false).await;
+                    return Err(match cleanup {
+                        Ok(()) => anyhow!(
+                            "guest jj installation failed with exit code {}",
+                            result.exit_code
+                        ),
+                        Err(cleanup) => anyhow!(
+                            "guest jj installation failed with exit code {} and provider cleanup failed: {cleanup}",
+                            result.exit_code
+                        ),
+                    });
+                }
+                if let Some(stage) = spec.guest_jj_stage.as_ref() {
+                    std::fs::remove_dir_all(stage)
+                        .context("could not remove Pando guest jj staging directory")?;
+                }
+            }
             if let Some(store) = spec.jj_store.as_ref() {
                 if let Err(error) = store.revalidate() {
                     let cleanup = self.runtime.remove(litebox.id().as_ref(), false).await;
@@ -514,6 +606,10 @@ mod boxlite_backend {
                 .exec(
                     BoxCommand::new(program)
                         .args(arguments.iter().cloned())
+                        .env(
+                            "PATH",
+                            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                        )
                         .working_dir(GUEST_WORKSPACE_PATH)
                         .tty(command.terminal),
                 )
@@ -1634,6 +1730,28 @@ mod policy_tests {
         }
         .validate()
         .is_ok());
+    }
+
+    #[cfg(all(feature = "microvm-boxlite", target_os = "linux"))]
+    #[test]
+    fn guest_jj_staging_is_workspace_local_and_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("host-jj");
+        let workspace = fixture.path().join("workspace");
+        std::fs::write(&source, b"guest jj").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(workspace.join(".jj")).unwrap();
+
+        let stage = super::stage_guest_jj(&source, &workspace).unwrap();
+        let staged_jj = stage.join("jj");
+        assert_eq!(stage, workspace.join(".jj/pando-tools-stage"));
+        assert_eq!(std::fs::read(&staged_jj).unwrap(), b"guest jj");
+        assert_eq!(
+            std::fs::metadata(staged_jj).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

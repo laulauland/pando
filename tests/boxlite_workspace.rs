@@ -230,49 +230,51 @@ fn non_jj_and_native_jj_workspaces_run_tools_and_preserve_isolation() {
         .unwrap();
     assert_eq!(failure.status.code(), Some(23));
 
-    for (name, point) in [
-        ("crash-temp-create", "journal-temp-created"),
-        ("crash-temp-write", "journal-temp-written"),
-        ("crash-journal", "journal-published"),
-        ("crash-intent", "create-intent"),
-        ("crash-provider", "provider-created"),
-        ("crash-start", "provider-started"),
-    ] {
-        assert_provisional_create_recovers(&home, &source, name, point, 1);
-    }
+    if crash_injection_expected() {
+        for (name, point) in [
+            ("crash-temp-create", "journal-temp-created"),
+            ("crash-temp-write", "journal-temp-written"),
+            ("crash-journal", "journal-published"),
+            ("crash-intent", "create-intent"),
+            ("crash-provider", "provider-created"),
+            ("crash-start", "provider-started"),
+        ] {
+            assert_provisional_create_recovers(&home, &source, name, point, 1);
+        }
 
-    for (name, point) in [
-        ("crash-clean-file", "journal-cleanup-published-unlinked"),
-        ("crash-clean-temp", "journal-cleanup-temp-unlinked"),
-        ("crash-clean-dir", "journal-cleanup-dir-unlinked"),
-    ] {
-        assert_committed_create_recovers(&home, &source, name, point);
-    }
+        for (name, point) in [
+            ("crash-clean-file", "journal-cleanup-published-unlinked"),
+            ("crash-clean-temp", "journal-cleanup-temp-unlinked"),
+            ("crash-clean-dir", "journal-cleanup-dir-unlinked"),
+        ] {
+            assert_committed_create_recovers(&home, &source, name, point);
+        }
 
-    let mut create_crash_commit = command(&home, &source);
-    create_crash_commit
-        .env("PANDO_TEST_CRASH_POINT", "metadata-published")
-        .args([
-            "create",
-            "crash-commit",
-            "--runtime",
-            "boxlite",
-            "--image",
-            "alpine:3.22",
-        ]);
-    common::add_qualified_runtime_cli_args(&mut create_crash_commit);
-    let interrupted_commit = create_crash_commit.output().unwrap();
-    assert_sigkill(interrupted_commit);
-    command(&home, &source)
-        .args(["info", "crash-commit"])
-        .assert_success();
-    assert!(home.join("state/crash-commit/meta.toml").exists());
-    assert!(!home
-        .join("transactions/crash-commit/runtime-create.toml")
-        .exists());
-    command(&home, &source)
-        .args(["remove", "crash-commit"])
-        .assert_success();
+        let mut create_crash_commit = command(&home, &source);
+        create_crash_commit
+            .env("PANDO_TEST_CRASH_POINT", "metadata-published")
+            .args([
+                "create",
+                "crash-commit",
+                "--runtime",
+                "boxlite",
+                "--image",
+                "alpine:3.22",
+            ]);
+        common::add_qualified_runtime_cli_args(&mut create_crash_commit);
+        let interrupted_commit = create_crash_commit.output().unwrap();
+        assert_sigkill(interrupted_commit);
+        command(&home, &source)
+            .args(["info", "crash-commit"])
+            .assert_success();
+        assert!(home.join("state/crash-commit/meta.toml").exists());
+        assert!(!home
+            .join("transactions/crash-commit/runtime-create.toml")
+            .exists());
+        command(&home, &source)
+            .args(["remove", "crash-commit"])
+            .assert_success();
+    }
 
     let async_runtime = tokio::runtime::Runtime::new().unwrap();
     async_runtime.block_on(async {
@@ -320,7 +322,6 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         String::from_utf8_lossy(&initialized.stderr)
     );
     fs::write(source.join("tracked.txt"), "canonical\n").unwrap();
-    fs::copy(&jj, source.join("guest-jj")).unwrap();
     fs::write(
         source.join("jj-config.toml"),
         "[user]\nname = \"Pando Guest\"\nemail = \"guest@example.invalid\"\n",
@@ -361,7 +362,7 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
     let canonical_head = fs::read(source.join(".git/HEAD")).unwrap();
     let canonical_index = fs::read(source.join(".git/index")).ok();
     let canonical_tracked = fs::read(source.join("tracked.txt")).unwrap();
-    let jj_command = "JJ_CONFIG=/workspace/jj-config.toml /workspace/guest-jj";
+    let jj_command = "JJ_CONFIG=/workspace/jj-config.toml jj";
 
     let root = command(home, &source)
         .args([
@@ -374,6 +375,15 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         ])
         .assert_success();
     assert_eq!(String::from_utf8(root.stdout).unwrap().trim(), "/workspace");
+    let guest_jj = command(home, &source)
+        .args(["exec", "jjdemo", "--", "sh", "-c", "command -v jj"])
+        .assert_success();
+    assert_eq!(
+        String::from_utf8(guest_jj.stdout).unwrap().trim(),
+        "/usr/local/bin/jj"
+    );
+    assert!(!workspace.join("guest-jj").exists());
+    assert!(!workspace.join(".jj/pando-tools-stage").exists());
     command(home, &source)
         .args([
             "exec",
@@ -452,30 +462,32 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         .assert_success();
     assert_eq!(restarted.stdout, b"concurrent guest write\n");
 
-    let interrupted_stop = command(home, &source)
-        .env("PANDO_TEST_CRASH_POINT", "remove-stopped")
-        .args(["remove", "jjdemo"])
-        .output()
-        .unwrap();
-    assert_sigkill(interrupted_stop);
-    assert!(home.join("state/jjdemo/meta.toml").exists());
-    assert!(workspace.exists());
-    let interrupted_remove = command(home, &source)
-        .env("PANDO_TEST_CRASH_POINT", "remove-provider-removed")
-        .args(["remove", "jjdemo"])
-        .output()
-        .unwrap();
-    assert_sigkill(interrupted_remove);
-    assert!(home.join("state/jjdemo/meta.toml").exists());
-    assert!(workspace.exists());
-    let interrupted_forget = command(home, &source)
-        .env("PANDO_TEST_CRASH_POINT", "remove-jj-forgotten")
-        .args(["remove", "jjdemo"])
-        .output()
-        .unwrap();
-    assert_sigkill(interrupted_forget);
-    assert!(home.join("state/jjdemo/meta.toml").exists());
-    assert!(workspace.exists());
+    if crash_injection_expected() {
+        let interrupted_stop = command(home, &source)
+            .env("PANDO_TEST_CRASH_POINT", "remove-stopped")
+            .args(["remove", "jjdemo"])
+            .output()
+            .unwrap();
+        assert_sigkill(interrupted_stop);
+        assert!(home.join("state/jjdemo/meta.toml").exists());
+        assert!(workspace.exists());
+        let interrupted_remove = command(home, &source)
+            .env("PANDO_TEST_CRASH_POINT", "remove-provider-removed")
+            .args(["remove", "jjdemo"])
+            .output()
+            .unwrap();
+        assert_sigkill(interrupted_remove);
+        assert!(home.join("state/jjdemo/meta.toml").exists());
+        assert!(workspace.exists());
+        let interrupted_forget = command(home, &source)
+            .env("PANDO_TEST_CRASH_POINT", "remove-jj-forgotten")
+            .args(["remove", "jjdemo"])
+            .output()
+            .unwrap();
+        assert_sigkill(interrupted_forget);
+        assert!(home.join("state/jjdemo/meta.toml").exists());
+        assert!(workspace.exists());
+    }
     command(home, &source)
         .args(["remove", "jjdemo"])
         .assert_success();
@@ -1192,6 +1204,10 @@ fn assert_sigkill(output: Output) {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn crash_injection_expected() -> bool {
+    std::env::var_os("PANDO_TEST_CRASH_INJECTION").as_deref() != Some(std::ffi::OsStr::new("0"))
 }
 
 fn assert_provisional_create_recovers(

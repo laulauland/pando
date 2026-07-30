@@ -24,7 +24,10 @@ The same CLI is also installed as `pd` for shorter invocations (`pd create`, `pd
 
     cd "$(pando create feature-x)"
 
-Build with `--features microvm-boxlite` to attach an optional BoxLite micro-VM to a workspace. The smallest runtime workflow is:
+Official Linux x86_64 release binaries include optional BoxLite micro-VM support.
+Pando remains host-only when no runtime is configured, and `--no-runtime`
+always forces a host-only workspace. Source builds enable the runtime with
+`--features microvm-boxlite`. The smallest runtime workflow is:
 
     pando create feature-x --runtime boxlite --image alpine:3.22 --cpus 2 --memory-mib 512
     pando exec feature-x -- uname -a
@@ -60,7 +63,11 @@ On Linux, Pando fails closed by default because BoxLite 0.9.7's bundled seccomp 
 
 BoxLite 0.9.7's Linux virtiofs mount preserves atomic exclusive creation, directories, rename, mmap visibility, and the filesystem primitives used by `jj`. It does **not** propagate BSD `flock` or POSIX `fcntl` advisory locks between host and guest: software sharing `/workspace` across that boundary must use atomic lock files/directories or avoid simultaneous access. Pando's live suite deliberately verifies both this limitation and concurrent host/guest `jj` integrity.
 
-Runtime-enabled binaries are currently experimental CI artifacts, not GitHub release, Homebrew, install-script, or mise artifacts. The [runtime packaging record](docs/runtime-packaging.md) documents platform status, artifact naming, measured size/build cost, embedded native assets, licensing and reproducibility blockers, and the future external executor seam.
+BoxLite runtime support in 0.4 is qualified only on Linux x86_64 with KVM API
+version 12. Apple Silicon release binaries retain Pando's host-only workspace
+behavior; `--runtime boxlite` reports that the release does not include runtime
+support. The [runtime packaging record](docs/runtime-packaging.md) documents the
+platform matrix, pinned native archive, notices, and qualification evidence.
 
 For native `jj` workspaces, Pando mounts the canonical `.jj/repo` store
 read-write at the guest path selected by the workspace's unchanged relative
@@ -71,6 +78,44 @@ canonical working-copy files are never mounted. Pando validates both pointers,
 their destinations, and every directory identity before and after provider
 creation; absolute, malformed, mismatched, symlinked, overlapping, and
 externally backed layouts fail closed.
+
+On Linux, a jj-backed runtime snapshots the host `jj` executable during
+creation, installs it at `/usr/local/bin/jj` in the persistent guest root disk,
+and removes the temporary workspace-local staging copy before creation
+commits. This makes `pando exec <name> -- jj status` work with minimal images
+such as `alpine:3.22` without exposing host tool directories.
+
+Edit files through the host workspace path and run executable work through the
+guest. Both paths see the same CoW working copy:
+
+```bash
+workspace="$(pando cd feature-x --print)"
+# Edit files below $workspace with the host editor or agent.
+pando exec feature-x -- jj status
+pando exec feature-x -- cargo test
+```
+
+Pando provisions `jj`, but project runtimes belong in the selected OCI image.
+For example, a Bun project can publish an image containing its pinned Bun
+version and native build tools, then select its immutable digest:
+
+```dockerfile
+FROM oven/bun:1.3.6-alpine
+RUN apk add --no-cache bash build-base git
+```
+
+```toml
+[runtime]
+runtime = "boxlite"
+image = "ghcr.io/example/pando-bun@sha256:..."
+cpus = 2
+memory_mib = 2048
+allow_unqualified_seccomp = true
+```
+
+Guest networking is disabled, so dependencies must already exist in the CoW
+workspace/image or be installable from a cache included in the image. For Bun,
+prefer `bun install --frozen-lockfile --offline` when such a cache is present.
 
 Names cannot contain whitespace or path separators. `--from` takes a `jj` revset that must resolve to exactly one commit; it is silently ignored when the source is not a `jj` repository. With no `--from`, the new workspace is based on the canonical workspace's `@-`.
 
@@ -125,13 +170,17 @@ Or with the release installer:
 
 Set `BIN_DIR` to choose the install directory, or `PANDO_VERSION` to install a specific release:
 
-    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.3.1 bash
+    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.4.0 bash
 
 The installer also writes bash, zsh, and fish completions for both `pando` and `pd` into user completion directories by default. Set `INSTALL_COMPLETIONS=0` to skip them, or override `BASH_COMPLETION_DIR`, `ZSH_COMPLETION_DIR`, or `FISH_COMPLETION_DIR`.
 
 ## Build
 
     cargo build --release
+
+Build the Linux runtime-enabled binary from source with:
+
+    cargo build --release --features microvm-boxlite
 
 The binaries land at `target/release/pando` and `target/release/pd`. Tests: `cargo test`. Integration tests under `tests/jj_registration.rs` are skipped when the `jj` binary is not on `PATH`.
 

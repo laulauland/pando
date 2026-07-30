@@ -12,6 +12,7 @@ if [ "$#" -eq 1 ]; then
   PANDO_TEST_BINARY="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
   test -x "${PANDO_TEST_BINARY}"
   export PANDO_TEST_BINARY
+  export PANDO_TEST_CRASH_INJECTION=0
 fi
 
 # Cargo's CARGO_BIN_EXE_pando points at target/debug/pando. A no-feature command can

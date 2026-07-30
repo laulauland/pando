@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 2 ]; then
+  echo "usage: $0 PANDO RUNTIME_ENABLED" >&2
+  exit 2
+fi
+
+pando="$1"
+runtime_enabled="$2"
+test_root="$(mktemp -d /tmp/pando-release-smoke.XXXXXX)"
+trap 'rm -rf "$test_root"' EXIT
+
+"$pando" --version
+PANDO_HOME="$test_root/default-home" "$pando" create default-host-only >/dev/null
+PANDO_HOME="$test_root/default-home" "$pando" info default-host-only --json >"$test_root/default.json"
+grep -q '"name": "default-host-only"' "$test_root/default.json"
+if grep -q '"runtime"' "$test_root/default.json"; then
+  echo "empty configuration unexpectedly enabled a runtime" >&2
+  exit 1
+fi
+PANDO_HOME="$test_root/default-home" "$pando" remove default-host-only
+
+PANDO_HOME="$test_root/home" "$pando" create host-only --no-runtime >/dev/null
+PANDO_HOME="$test_root/home" "$pando" info host-only --json | grep -q '"name": "host-only"'
+PANDO_HOME="$test_root/home" "$pando" remove host-only
+
+if [ "$runtime_enabled" = true ]; then
+  "$pando" create --help | grep -q -- '--runtime'
+  "$pando" create --help | grep -q -- '--allow-unqualified-seccomp'
+else
+  if "$pando" create --help | grep -q -- '--allow-unqualified-seccomp'; then
+    echo "host-only artifact exposed Linux runtime qualification controls" >&2
+    exit 1
+  fi
+fi

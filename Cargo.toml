@@ -1,7 +1,11 @@
 [package]
 name = "pando"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
+license = "MIT"
+description = "Isolated copy-on-write workspaces with native jj integration"
+homepage = "https://github.com/laulauland/pando"
+repository = "https://github.com/laulauland/pando"
 
 [features]
 default = []

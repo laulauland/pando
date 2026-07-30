@@ -367,6 +367,19 @@ pub async fn create_workspace_with_runtime<B: CowBackend>(
         .with_policy(policy);
     if let Some(mount) = jj_mount {
         runtime_spec = runtime_spec.with_jj_store(mount);
+        #[cfg(target_os = "linux")]
+        {
+            let guest_jj_stage = match crate::runtime::prepare_guest_jj_stage(&workspace_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    destroy_workspace_locked(home, backend, name, false).with_context(|| {
+                        format!("guest jj staging failed ({error:#}); workspace rollback failed")
+                    })?;
+                    return Err(error.context("guest jj staging failed"));
+                }
+            };
+            runtime_spec = runtime_spec.with_guest_jj_stage(guest_jj_stage);
+        }
     }
     let identity = match runtime.create(runtime_spec).await {
         Ok(identity) => identity,
