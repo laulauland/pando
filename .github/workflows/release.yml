@@ -35,6 +35,11 @@ jobs:
         run: |
           rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${{ matrix.target }}"
           rustup default "${RUST_TOOLCHAIN}"
+      - name: Install BoxLite build prerequisites
+        if: matrix.runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - name: Verify the pinned BoxLite runtime archive
         if: matrix.runtime
         run: scripts/prepare-boxlite-runtime "${RUNNER_TEMP}/boxlite-runtime.tar.gz"

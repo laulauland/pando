@@ -28,6 +28,14 @@ jobs:
         run: |
           rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${{ matrix.target }}"
           rustup default "${RUST_TOOLCHAIN}"
+      - name: Install BoxLite build prerequisites
+        run: |
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y protobuf-compiler
+          else
+            brew install protobuf
+          fi
       - name: Verify privileged workflow trust gates
         run: scripts/check-runtime-workflow-trust
       - name: Build default and experimental runtime artifacts
