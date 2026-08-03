@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, env, fs, path::Path};
 const REQUIRED_GATE: &str = "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected";
 const REQUIRED_ENVIRONMENT: &str = "pando-runtime-qualification";
 const DOWNLOAD_ACTION: &str = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093";
-const JOBS: [(&str, [&str; 4]); 3] = [
+const JOBS: [(&str, [&str; 4]); 2] = [
     (
         "live-linux-kernel-overlay",
         ["self-hosted", "Linux", "X64", "pando-kvm-root"],
@@ -13,10 +13,6 @@ const JOBS: [(&str, [&str; 4]); 3] = [
     (
         "live-linux-fuse-overlay",
         ["self-hosted", "Linux", "X64", "pando-kvm-rootless"],
-    ),
-    (
-        "live-macos-hvf",
-        ["self-hosted", "macOS", "ARM64", "pando-hvf"],
     ),
 ];
 
@@ -150,7 +146,7 @@ mod tests {
 
     fn valid() -> String {
         format!(
-            "jobs:\n{}{}{}",
+            "jobs:\n{}{}",
             job(
                 "live-linux-kernel-overlay",
                 "self-hosted, Linux, X64, pando-kvm-root"
@@ -158,8 +154,7 @@ mod tests {
             job(
                 "live-linux-fuse-overlay",
                 "self-hosted, Linux, X64, pando-kvm-rootless"
-            ),
-            job("live-macos-hvf", "self-hosted, macOS, ARM64, pando-hvf")
+            )
         )
     }
 
