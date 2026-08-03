@@ -26,28 +26,10 @@ pub fn validate_runtime_platform() -> Result<()> {
             }
         })
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        validate_macos_hvf_with(|| {
-            let output = std::process::Command::new("/usr/sbin/sysctl")
-                .args(["-n", "kern.hv_support"])
-                .output()?;
-            if !output.status.success() {
-                return Err(std::io::Error::other(
-                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-                ));
-            }
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        })
-    }
-    #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
-    anyhow::bail!("BoxLite runtimes are unsupported on Intel Macs; use Apple Silicon with Hypervisor.framework");
     #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
     anyhow::bail!("BoxLite runtimes are currently qualified only on Linux x86_64 with KVM");
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    anyhow::bail!(
-        "BoxLite runtimes are supported only on Linux x86_64/KVM and Apple Silicon macOS/HVF"
-    );
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!("BoxLite runtimes are supported only on Linux x86_64/KVM");
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -68,19 +50,6 @@ fn validate_linux_kvm_at(
     if version != 12 {
         anyhow::bail!(
             "BoxLite requires KVM API version 12, but /dev/kvm reported {version}; update or enable a compatible KVM kernel module"
-        );
-    }
-    Ok(())
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn validate_macos_hvf_with(query: impl FnOnce() -> std::io::Result<String>) -> Result<()> {
-    let support = query().map_err(|error| anyhow::anyhow!(
-        "BoxLite could not query kern.hv_support ({error}); Hypervisor.framework availability is required"
-    ))?;
-    if support != "1" {
-        anyhow::bail!(
-            "BoxLite requires Hypervisor.framework support, but kern.hv_support reported {support:?}"
         );
     }
     Ok(())

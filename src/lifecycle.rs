@@ -579,13 +579,13 @@ pub async fn inspect_workspace_runtime(
 
     validate_name(name)?;
     let _lock = acquire_runtime_lock(home).await?;
-    let runtime = BoxLiteRuntimeBackend::new(home)?;
-    recover_platform_runtime_transactions(home, &runtime).await?;
+    recover_if_needed_locked(home, &crate::backend::PlatformCowBackend::default()).await?;
     let metadata = read_metadata(&state_dir(home, name))
         .with_context(|| format!("workspace not found: {name}"))?;
     let Some(runtime_metadata) = metadata.runtime.clone() else {
         return Ok((metadata, None));
     };
+    let runtime = BoxLiteRuntimeBackend::new(home)?;
     let info = runtime.inspect(&runtime_metadata.identity).await?;
     Ok((metadata, Some(info)))
 }
@@ -602,11 +602,11 @@ pub async fn destroy_workspace_with_runtime<B: CowBackend>(
     validate_name(name)?;
     let _lock = acquire_runtime_lock(home).await?;
     ensure_home(home)?;
-    let runtime = BoxLiteRuntimeBackend::new(home)?;
-    recover_runtime_transactions(home, backend, &runtime).await?;
+    recover_if_needed_locked(home, backend).await?;
     let state_dir = state_dir(home, name);
     let metadata = read_metadata(&state_dir)?;
     if let Some(runtime_metadata) = metadata.runtime.as_ref() {
+        let runtime = BoxLiteRuntimeBackend::new(home)?;
         destroy_runtime_locked(
             backend,
             &runtime,
