@@ -58,7 +58,7 @@ memory_mib = 512
 allow_unqualified_seccomp = true
 ```
 
-With this file, `pando create <name>` creates a VM automatically. Explicit CLI values override config. Use `--no-runtime` for a host-only exception. On macOS omit `allow_unqualified_seccomp`.
+With this file, `pando create <name>` creates a VM automatically. Explicit CLI values override config. Use `--no-runtime` for a host-only exception. VM runtimes are supported only on Linux x86_64/KVM in Pando 0.4; on macOS, leave runtime unconfigured and use host-only workspaces.
 
 Never add the Linux seccomp acknowledgement silently. It records that BoxLite 0.9.7's provider filter is disabled on the qualified Linux path; VM isolation, sealed mounts, resource limits, and disabled networking remain, but seccomp is not qualified.
 
