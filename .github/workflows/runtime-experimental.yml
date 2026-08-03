@@ -52,7 +52,8 @@ jobs:
           find target -path '*/runtime-experimental/build/*/out/runtime/boxlite-shim' -type f > /tmp/pando-shims
           test "$(wc -l < /tmp/pando-shims | tr -d ' ')" = 1
           shim="$(sed -n '1p' /tmp/pando-shims)"
-          codesign -d --entitlements :- "${shim}" > /tmp/pando-entitlements.plist 2>/dev/null
+          codesign --display --entitlements - --xml "${shim}" > /tmp/pando-entitlements.plist
+          plutil -lint /tmp/pando-entitlements.plist
           test "$(plutil -extract com.apple.security.hypervisor raw -o - /tmp/pando-entitlements.plist)" = true
       - name: Package experimental artifact
         run: |
