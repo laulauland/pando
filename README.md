@@ -1,42 +1,109 @@
-# pando
+# Pando
 
-`pando` creates isolated, copy-on-write workspaces from a source directory. Each workspace is a CoW clone of the source tree, registered as a native `jj` workspace when the source is a `jj` repository, so you can edit, build, and commit in parallel without disturbing the canonical checkout. 
+Run features, experiments, and coding agents in parallel without disturbing your
+main checkout.
 
-> `pando` is named after the clonal aspen colony: many trunks, one root system.
+Pando creates a writable workspace from the directory you are in. On Linux and
+macOS it uses copy-on-write storage, and in a `jj` repository each workspace is
+registered as a native `jj` workspace. On supported Linux systems, a workspace
+can also have its own persistent microVM for builds, tests, and agent commands.
 
-## Usage
+> Pando is named after the clonal aspen colony: many trunks, one root system.
 
-    pando create <name> [--from <revset>] [--runtime boxlite | --no-runtime] [--image <image>] [--cpus <count>] [--memory-mib <MiB>]
-    pando exec <name> -- <command> [args...]
-    pando shell <name>
-    pando stop <name>
-    pando list
-    pando info <name> [--json]
-    pando get  <name> [--json]
-    pando cd   <name> [--print]
-    pando remove <name> [--keep-jj-workspace]
-    pando rm     <name> [--keep-jj-workspace]
-    pando completions <shell>
+## What you can do
 
-The same CLI is also installed as `pd` for shorter invocations (`pd create`, `pd rm`, …). Examples below use `pando`.
+- Give each feature or coding agent its own working copy.
+- Start a `jj` workspace from Pando's default base or another revision.
+- Keep using host editors and agents while commands run inside a microVM.
+- Stop a VM and resume it later without losing its root filesystem or workspace.
+- Remove an experiment without touching the canonical checkout.
 
-`pando create` runs from the current directory and prints the new workspace's absolute path to stdout, so the common shell idiom is:
+## Install
 
-    cd "$(pando create feature-x)"
+With Homebrew:
 
-Official Linux x86_64 release binaries include optional BoxLite micro-VM support.
-Pando remains host-only when no runtime is configured, and `--no-runtime`
-always forces a host-only workspace. Source builds enable the runtime with
-`--features microvm-boxlite`. The smallest runtime workflow is:
+```bash
+brew install laulauland/tap/pando
+```
 
-    pando create feature-x --runtime boxlite --image alpine:3.22 --cpus 2 --memory-mib 512
-    pando exec feature-x -- uname -a
-    pando shell feature-x
-    pando stop feature-x
-    pando remove feature-x
+Or with the release installer:
 
-Repeated runtime flags can live in `$PANDO_HOME/config.toml` (normally
-`~/.pando/config.toml`):
+```bash
+curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | bash
+```
+
+The installer accepts `BIN_DIR` and `PANDO_VERSION` overrides and installs shell
+completions by default. See `pando --help` for the complete command reference.
+The same CLI is also installed as `pd` for shorter commands.
+
+## Create a parallel workspace
+
+From any source directory:
+
+```bash
+cd my-project
+cd "$(pando create feature-x)"
+```
+
+Edit, build, and commit normally. In a `jj` repository, Pando registers a native
+workspace automatically. By default it starts from the canonical workspace's
+`@-`; choose another commit with a revset:
+
+```bash
+pando create investigate-bug --from 'main@origin'
+```
+
+Inspect your workspaces and return to one later:
+
+```bash
+pando list
+pando info feature-x
+pando cd feature-x
+```
+
+When the work is finished:
+
+```bash
+pando remove feature-x
+```
+
+Removing a Pando workspace also forgets its registered `jj` workspace. Use
+`--keep-jj-workspace` only when you deliberately want to keep that registration.
+
+## Add a persistent VM
+
+Official Linux x86_64 release binaries include optional BoxLite microVM support.
+Create a VM-backed workspace by selecting an OCI image:
+
+```bash
+pando create feature-x \
+  --runtime boxlite \
+  --image alpine:3.22 \
+  --cpus 2 \
+  --memory-mib 512 \
+  --allow-unqualified-seccomp
+
+pando exec feature-x -- uname -a
+pando shell feature-x
+```
+
+Your host tools edit the Pando workspace while VM commands see the same files at
+`/workspace`:
+
+```bash
+workspace="$(pando cd feature-x --print)"
+# Point your host editor or agent at $workspace.
+pando exec feature-x -- jj status
+```
+
+Choose an image containing your project's toolchain to run its builds and tests
+the same way.
+
+`pando stop feature-x` ends guest processes but preserves the guest root disk and
+workspace. The next `exec` or `shell` starts it again. `pando remove feature-x`
+stops and removes the VM as well as the workspace.
+
+Repeated VM options can live in `~/.pando/config.toml`:
 
 ```toml
 [runtime]
@@ -44,158 +111,56 @@ runtime = "boxlite"
 image = "alpine:3.22"
 cpus = 2
 memory_mib = 512
-allow_unqualified_seccomp = true # Linux only; explicit security acknowledgement
+allow_unqualified_seccomp = true # required acknowledgement on Linux
 ```
 
-With that configuration, `pando create feature-x` creates both the workspace and
-its VM; use `pando create feature-x --no-runtime` for a host-only exception.
-Command-line values override configured values. Setting image or resource
-defaults does not enable a VM by itself: `runtime = "boxlite"` or an explicit
-`--runtime boxlite` is required. Unknown configuration keys and invalid values fail
-before workspace mutation. On macOS, omit `allow_unqualified_seccomp`; the option is
-specific to BoxLite 0.9.7's Linux seccomp incompatibility.
+With this configuration, `pando create feature-x` creates the workspace and its
+VM. Use `--no-runtime` for a host-only exception.
 
-`exec` preserves argument boundaries and returns the guest command's exit status. `shell` opens an interactive `/bin/sh`; both commands restart a stopped runtime. Runtime workspaces are mounted read-write at `/workspace`, which is also the guest command's working directory. `info` reports the configured image, provider ID, and observed runtime state. Removing a runtime workspace stops and removes its VM before deleting the copy-on-write workspace.
+### Runtime support and limitations
 
-Runtime creation validates CPU (1–64) and memory (128–262144 MiB) limits before workspace mutation; defaults are 2 CPUs and 512 MiB. Networking is always disabled in this release: BoxLite supplies only loopback and an unconnected dummy interface, with no default route. There is intentionally no network-enable flag yet. Guest root-disk state and `/workspace` persist across `stop`, while guest processes do not.
+VM-backed workspaces currently require Linux x86_64, KVM API version 12, and
+read/write access to `/dev/kvm`. Release binaries on macOS provide host-only
+workspaces.
 
-On Linux, Pando fails closed by default because BoxLite 0.9.7's bundled seccomp profile terminates the qualified libkrun path with `SIGSYS`. `--allow-unqualified-seccomp` explicitly acknowledges running with that provider filter disabled; VM isolation, the BoxLite jailer, sealed mounts, resource limits, and disabled networking remain active, but this is not equivalent to a qualified seccomp sandbox. macOS uses Hypervisor.framework and does not expose this Linux-only override.
+VM networking is disabled. Project runtimes and dependencies must already be in
+the selected image, the workspace, or an offline cache.
 
-BoxLite 0.9.7's Linux virtiofs mount preserves atomic exclusive creation, directories, rename, mmap visibility, and the filesystem primitives used by `jj`. It does **not** propagate BSD `flock` or POSIX `fcntl` advisory locks between host and guest: software sharing `/workspace` across that boundary must use atomic lock files/directories or avoid simultaneous access. Pando's live suite deliberately verifies both this limitation and concurrent host/guest `jj` integrity.
+On Linux, BoxLite 0.9.7 also requires an explicit acknowledgement that its
+provider seccomp filter is disabled. VM isolation, the BoxLite jailer, sealed
+mounts, resource limits, and disabled networking remain active, but this is not
+equivalent to a qualified seccomp sandbox.
 
-BoxLite runtime support in 0.4 is qualified only on Linux x86_64 with KVM API
-version 12. Apple Silicon release binaries retain Pando's host-only workspace
-behavior; `--runtime boxlite` reports that the release does not include runtime
-support. The [runtime packaging record](docs/runtime-packaging.md) documents the
-platform matrix, pinned native archive, notices, and qualification evidence.
+Host and guest processes sharing `/workspace` must not rely on BSD `flock` or
+POSIX `fcntl` advisory locks being coordinated across that boundary. See the
+[runtime guide](docs/runtime.md) before enabling VM-backed workspaces. The
+[runtime packaging record](docs/runtime-packaging.md) contains the full platform
+matrix, qualification evidence, provenance, and notices.
 
-For native `jj` workspaces, Pando mounts the canonical `.jj/repo` store
-read-write at the guest path selected by the workspace's unchanged relative
-`.jj/repo` pointer. Standard colocated repositories are supported too: Pando
-additionally mounts the canonical `.git` directory read-write at the exact
-destination selected by the store's unchanged `git_target` pointer. The
-canonical working-copy files are never mounted. Pando validates both pointers,
-their destinations, and every directory identity before and after provider
-creation; absolute, malformed, mismatched, symlinked, overlapping, and
-externally backed layouts fail closed.
+## How Pando fits together
 
-On Linux, a jj-backed runtime snapshots the host `jj` executable during
-creation, installs it at `/usr/local/bin/jj` in the persistent guest root disk,
-and removes the temporary workspace-local staging copy before creation
-commits. This makes `pando exec <name> -- jj status` work with minimal images
-such as `alpine:3.22` without exposing host tool directories.
+```text
+canonical source
+    └── copy-on-write workspace      edit with host tools
+            ├── native jj workspace  share repository history
+            └── optional microVM      run commands in /workspace
+```
 
-Edit files through the host workspace path and run executable work through the
-guest. Both paths see the same CoW working copy:
+Pando owns workspace and runtime lifecycle. It does not choose an agent, infer
+project dependencies, or build an OCI image. This narrow boundary lets editors,
+coding agents, and scripts use the same commands:
 
 ```bash
-workspace="$(pando cd feature-x --print)"
-# Edit files below $workspace with the host editor or agent.
-pando exec feature-x -- jj status
-pando exec feature-x -- cargo test
+pando create <name>
+pando exec <name> -- <command> [args...]
+pando shell <name>
+pando stop <name>
+pando list
+pando info <name> [--json]
+pando cd <name> [--print]
+pando remove <name>
 ```
 
-Pando provisions `jj`, but project runtimes belong in the selected OCI image.
-For example, a Bun project can publish an image containing its pinned Bun
-version and native build tools, then select its immutable digest:
-
-```dockerfile
-FROM oven/bun:1.3.6-alpine
-RUN apk add --no-cache bash build-base git
-```
-
-```toml
-[runtime]
-runtime = "boxlite"
-image = "ghcr.io/example/pando-bun@sha256:..."
-cpus = 2
-memory_mib = 2048
-allow_unqualified_seccomp = true
-```
-
-Guest networking is disabled, so dependencies must already exist in the CoW
-workspace/image or be installable from a cache included in the image. For Bun,
-prefer `bun install --frozen-lockfile --offline` when such a cache is present.
-
-Names cannot contain whitespace or path separators. `--from` takes a `jj` revset that must resolve to exactly one commit; it is silently ignored when the source is not a `jj` repository. With no `--from`, the new workspace is based on the canonical workspace's `@-`.
-
-`pando list` prints an aligned table — `NAME`, `AGE`, `BASE` (jj change id revision), and `JJ` (the registered workspace name, or `-` for non-jj sources):
-
-    NAME       AGE  BASE  JJ
-    feature-x  4m   y     pando-feature-x
-    plain      1h   -     -
-
-`pando info <name>` prints workspace facts as an aligned table. Pass `--json` for stable JSON output for scripts, including state and workspace paths, canonical root, creation time, and `jj` metadata when present. `pando get <name>` is an alias for `info`.
-
-`pando cd <name>` opens your shell in that workspace. Pass `--print` to print the workspace path instead.
-
-`pando remove` deletes the workspace and its state, then forgets the corresponding `jj` workspace from the canonical repo. `--keep-jj-workspace` skips the `jj` forget step but still deletes the Pando-owned files.
-
-`pando completions <shell>` prints a clap-generated completion script to stdout, e.g. `pando completions fish > ~/.config/fish/completions/pando.fish`.
-
-## How it works
-
-Pando separates user-facing workspaces from implementation state under `$PANDO_HOME` (default `~/.pando`):
-
-    ~/.pando/
-    ├── workspaces/
-    │   └── <name>/
-    └── state/
-        ├── .lock
-        └── <name>/
-            ├── meta.toml
-            └── overlay/       # Linux only
-                ├── upper/
-                └── work/
-
-The path under `workspaces/<name>` is the directory to edit or mount into a VM or container. `meta.toml` records the canonical root, workspace path, creation time, and any `jj` registration data. The state lock serializes lifecycle operations so concurrent `pando` invocations do not race.
-
-On the first operational command after upgrading to 0.3, Pando automatically migrates workspaces from the previous default `~/.local/state/pando` layout. Linux OverlayFS workspaces are unmounted, moved, and remounted at their new paths; workspace changes and `jj` registrations are preserved. Custom `$PANDO_HOME` directories are migrated in place.
-
-The copy-on-write backend is selected at compile time. On macOS, files are cloned with APFS `clonefile(2)`. On Linux, `workspaces/<name>` is an OverlayFS mount with the source as `lowerdir` and Pando-owned `upperdir`/`workdir` under `state/<name>/overlay`. On other platforms, the source tree is copied recursively.
-
-When the source contains a `.jj/` directory, pando uses `jj-lib` directly (no shelling out to `jj`) to register the new workspace as `pando-<name>` against the canonical repo, point its `@` at the resolved base commit, and reconcile the working copy. Author identity for the pando-created working-copy commit is read from your `jj` user config (`~/.config/jj/config.toml` or `$XDG_CONFIG_HOME/jj/config.toml`). If `jj` registration fails, the state directory is rolled back so `create` is atomic from the user's point of view.
-
-`remove` is the inverse: it forgets the `jj` workspace via a transaction on the canonical repo and then removes the workspace and state directories. If the `jj` forget step fails, both are left in place so the operation can be retried.
-
-## Install
-
-With Homebrew:
-
-    brew install laulauland/tap/pando
-
-Or with the release installer:
-
-    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | bash
-
-Set `BIN_DIR` to choose the install directory, or `PANDO_VERSION` to install a specific release:
-
-    curl -fsSL https://raw.githubusercontent.com/laulauland/pando/main/scripts/install.sh | BIN_DIR=~/.local/bin PANDO_VERSION=0.4.0 bash
-
-The installer also writes bash, zsh, and fish completions for both `pando` and `pd` into user completion directories by default. Set `INSTALL_COMPLETIONS=0` to skip them, or override `BASH_COMPLETION_DIR`, `ZSH_COMPLETION_DIR`, or `FISH_COMPLETION_DIR`.
-
-## Build
-
-    cargo build --release
-
-Build the Linux runtime-enabled binary from source with:
-
-    cargo build --release --features microvm-boxlite
-
-The binaries land at `target/release/pando` and `target/release/pd`. Tests: `cargo test`. Integration tests under `tests/jj_registration.rs` are skipped when the `jj` binary is not on `PATH`.
-
-## Benchmark
-
-Measure real workspace creation against a source directory:
-
-    cargo bench --bench create -- /path/to/workspace --samples 10 --output target/bench-results/current.json
-
-Compare multiple candidate Pando checkouts against the same workload:
-
-    cargo bench --bench compare -- /path/to/workspace \
-      --candidate /path/to/pando-baseline \
-      --candidate /path/to/pando-candidate \
-      --samples 10 \
-      --output target/bench-results/compare-run
-
-The create benchmark times only `create_workspace`; cleanup runs after each measured sample and the JSON result records median, minimum, maximum, and cleanup status.
+For storage, `jj`, and lifecycle internals, see
+[Architecture](docs/architecture.md). To build or benchmark Pando, see
+[Contributing](CONTRIBUTING.md).
