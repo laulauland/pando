@@ -494,6 +494,7 @@ fn format_workspace_info_table(info: &WorkspaceInfo) -> String {
         .runtime
         .as_ref()
         .map(|runtime| match runtime.network {
+            crate::runtime::RuntimeNetworkPolicy::Enabled => "enabled",
             crate::runtime::RuntimeNetworkPolicy::Disabled => "disabled",
         })
         .unwrap_or("-");
@@ -632,7 +633,7 @@ fn run_from(cli: Cli, binary_name: &'static str) -> Result<()> {
                         let policy = crate::runtime::RuntimePolicy {
                             cpu_count: resolved.cpus,
                             memory_mib: resolved.memory_mib,
-                            network: crate::runtime::RuntimeNetworkPolicy::Disabled,
+                            network: crate::runtime::RuntimeNetworkPolicy::Enabled,
                             seccomp: if resolved.allow_unqualified_seccomp {
                                 crate::runtime::RuntimeSeccompPolicy::AllowUnqualifiedProvider
                             } else {

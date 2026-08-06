@@ -15,6 +15,7 @@ can also have its own persistent microVM for builds, tests, and agent commands.
 - Give each feature or coding agent its own working copy.
 - Start a `jj` workspace from Pando's default base or another revision.
 - Keep using host editors and agents while commands run inside a microVM.
+- Fetch dependencies and run networked tools inside the microVM.
 - Stop a VM and resume it later without losing its root filesystem or workspace.
 - Remove an experiment without touching the canonical checkout.
 
@@ -123,13 +124,13 @@ VM-backed workspaces currently require Linux x86_64, KVM API version 12, and
 read/write access to `/dev/kvm`. Release binaries on macOS provide host-only
 workspaces.
 
-VM networking is disabled. Project runtimes and dependencies must already be in
-the selected image, the workspace, or an offline cache.
+VMs have outbound networking enabled, including DNS and HTTPS, so project tools
+can fetch dependencies into the persistent workspace or guest root disk.
 
 On Linux, BoxLite 0.9.7 also requires an explicit acknowledgement that its
 provider seccomp filter is disabled. VM isolation, the BoxLite jailer, sealed
-mounts, resource limits, and disabled networking remain active, but this is not
-equivalent to a qualified seccomp sandbox.
+mounts, and resource limits remain active, but this is not equivalent to a
+qualified seccomp sandbox.
 
 Host and guest processes sharing `/workspace` must not rely on BSD `flock` or
 POSIX `fcntl` advisory locks being coordinated across that boundary. See the

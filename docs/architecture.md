@@ -57,6 +57,11 @@ fails, both directories remain so the operation can be retried.
 VM mount topology and its security checks are documented in the
 [VM runtime guide](runtime.md).
 
+The disk-backed BoxLite path does not attach its otherwise empty shared
+virtiofs device. `/workspace`, canonical `.jj/repo`, and canonical `.git`
+remain independent validated mounts; the saved x86_64 virtio IRQ is used by
+the outbound network device without mounting any broader canonical directory.
+
 ## Lifecycle metadata and automation
 
 `pando list` provides human-readable workspace status. For automation,

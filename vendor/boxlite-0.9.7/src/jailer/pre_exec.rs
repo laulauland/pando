@@ -1,0 +1,158 @@
+//! Pre-execution hook for process isolation.
+//!
+//! This module provides the pre-execution hook that runs after `fork()` but
+//! before the new program starts in the child process.
+//!
+//! # What it does
+//!
+//! 1. **Close inherited FDs** - Prevents information leakage
+//! 2. **Apply rlimits** - Resource limits (max files, memory, CPU time, etc.)
+//! 3. **Write PID file** - Single source of truth for process tracking
+//!
+//! Sandbox-specific pre_exec hooks (cgroup join, Landlock restriction) are
+//! added by each sandbox's `apply()` method — they run before this hook
+//! since `Command::pre_exec` closures execute in registration order.
+//!
+//! # Safety
+//!
+//! The hook runs in a very restricted context:
+//! - Only async-signal-safe syscalls are allowed
+//! - No memory allocation (no Box, Vec, String)
+//! - No mutex operations
+//! - No logging (tracing, println)
+//!
+//! See the [`common`](crate::jailer::common) module for async-signal-safe utilities.
+
+use crate::jailer::common;
+use crate::runtime::advanced_options::ResourceLimits;
+use crate::util::{PidFileWriter, PidRecord};
+use std::os::fd::RawFd;
+use std::process::Command;
+
+/// Add pre-execution hook for process isolation (async-signal-safe).
+///
+/// Runs after fork() but before the new program starts in the child process.
+/// Applies: FD preservation (dup2), FD cleanup, rlimits, PID file writing.
+///
+/// # Arguments
+///
+/// * `cmd` - The Command to add the hook to
+/// * `resource_limits` - Resource limits to apply
+/// * `pid_writer` - Async-signal-safe writer (pre-allocated in the parent)
+/// * `preserved_fds` - FDs to preserve: each `(source, target)` is dup2'd before cleanup.
+///   After dup2, all FDs above the highest target are closed.
+///   Pass empty vec for default behavior (close all FDs >= 3).
+///
+/// # Safety
+///
+/// This function uses `unsafe` to set the hook. The hook itself
+/// only uses async-signal-safe operations:
+/// - `dup2()` / `close()` / `close_range()` syscalls
+/// - `setrlimit()` syscall
+/// - `open()` / `write()` / `close()` syscalls (for PID file)
+/// - `getpid()` syscall
+///
+/// **Do NOT add any of the following to the hook:**
+/// - Logging (tracing, println, eprintln)
+/// - Memory allocation (Box, Vec, String creation)
+/// - Mutex operations
+/// - Most Rust standard library functions
+pub fn add_pre_exec_hook(
+    cmd: &mut Command,
+    resource_limits: ResourceLimits,
+    pid_writer: Option<PidFileWriter>,
+    preserved_fds: Vec<(RawFd, i32)>,
+    detach: bool,
+) {
+    use std::os::unix::process::CommandExt;
+
+    // Detach=false → child's own process group at Command-build time
+    // so a later `killpg(shim_pid, SIGKILL)` reaps the shim plus its
+    // grandchildren (libkrun threads, gvproxy) atomically.
+    //
+    // Gated on `!detach` because the detached branch below uses
+    // `setsid()`, which creates a new session AND a new pgroup with
+    // the child as leader of both. Calling `process_group(0)` here
+    // would make the child a pgroup leader before `setsid()` runs;
+    // `setsid()` then fails with EPERM (POSIX: setsid is forbidden
+    // for an existing pgroup leader). The branches are exclusive on
+    // purpose — `setsid()` already covers the pgroup case.
+    if !detach {
+        cmd.process_group(0);
+    }
+
+    // SAFETY: The hook only uses async-signal-safe syscalls.
+    // See module documentation for details.
+    unsafe {
+        cmd.pre_exec(move || {
+            // 1. FD preservation + cleanup
+            // If preserved_fds is non-empty, dup2 each (source -> target),
+            // then close everything above the highest target.
+            // Otherwise, close all FDs >= 3 (default behavior).
+            if !preserved_fds.is_empty() {
+                for &(source, target) in &preserved_fds {
+                    if source != target {
+                        libc::dup2(source, target);
+                    }
+                }
+                let first_close = preserved_fds.iter().map(|(_, t)| *t).max().unwrap() + 1;
+                common::fd::close_fds_from(first_close)
+                    .map_err(std::io::Error::from_raw_os_error)?;
+            } else {
+                common::fd::close_inherited_fds_raw().map_err(std::io::Error::from_raw_os_error)?;
+            }
+
+            // 2. Apply resource limits (rlimits)
+            common::rlimit::apply_limits_raw(&resource_limits)
+                .map_err(std::io::Error::from_raw_os_error)?;
+
+            // 3. Write PID file
+            if let Some(ref writer) = pid_writer {
+                writer
+                    .write(&PidRecord::current())
+                    .map_err(std::io::Error::from_raw_os_error)?;
+            }
+
+            // 4. Detach=true → setsid: child becomes a session leader,
+            // detaching from the parent's controlling terminal. Without
+            // this a SIGHUP on the parent's terminal cascades into the
+            // daemon (the `BoxOptions::detach` contract relies on it).
+            // `setsid` is async-signal-safe.
+            if detach && libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(())
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_hook_compiles() {
+        let mut cmd = Command::new("/bin/echo");
+        let limits = ResourceLimits::default();
+
+        add_pre_exec_hook(&mut cmd, limits, None, vec![], false);
+    }
+
+    #[test]
+    fn test_add_hook_with_pid_file() {
+        let mut cmd = Command::new("/bin/echo");
+        let limits = ResourceLimits::default();
+        let writer = PidFileWriter::at(std::path::Path::new("/tmp/test.pid")).ok();
+        add_pre_exec_hook(&mut cmd, limits, writer, vec![], false);
+    }
+
+    #[test]
+    fn test_add_hook_with_preserved_fds() {
+        let mut cmd = Command::new("/bin/echo");
+        let limits = ResourceLimits::default();
+
+        // Simulate preserving fd 5 → target fd 3
+        add_pre_exec_hook(&mut cmd, limits, None, vec![(5, 3)], false);
+    }
+}

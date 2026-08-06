@@ -1,6 +1,6 @@
 # Linux runtime packaging
 
-Pando 0.4's Linux x86_64 GitHub release and Homebrew bottle include the BoxLite
+Pando 0.5's Linux x86_64 GitHub release and Homebrew bottle include the BoxLite
 runtime. The same binary retains the ordinary host-only lifecycle: with no
 configured runtime, `create` remains host-only, and `--no-runtime` is an explicit
 override. macOS release artifacts are host-only; VM runtimes are supported only
@@ -25,8 +25,8 @@ Self-hosted labels are routing metadata, not a trust boundary. The KVM root and 
 | Platform | Build | Live workflow | Current evidence |
 | --- | --- | --- | --- |
 | Linux x86_64 with KVM API version 12 | Hosted CI | Self-hosted KVM, separately as root and non-root | gondor passes the complete workflow as non-root with fuse-overlayfs; the kernel-OverlayFS lane is defined but has not run |
-| Apple Silicon macOS | Host-only release | None | VM runtime unsupported in 0.4 |
-| Intel macOS | Host-only release | None | VM runtime unsupported in 0.4 |
+| Apple Silicon macOS | Host-only release | None | VM runtime unsupported in 0.5 |
+| Intel macOS | Host-only release | None | VM runtime unsupported in 0.5 |
 | Other Linux architectures or Linux without usable KVM | Not supported | None | runtime creation reports the qualified architecture or `/dev/kvm` access requirement before workspace mutation |
 
 The Linux runtime release requires the complete rootless fuse-overlayfs live lane
@@ -50,6 +50,15 @@ The runtime-enabled Linux executable dynamically needs only the system loader, g
 ## Pinning, provenance, and notices
 
 Pando pins the pre-1.0 `boxlite` crate exactly to `0.9.7`; its API and serialized/provider behavior must be requalified before every version change. BoxLite, `libkrun-sys`, `e2fsprogs-sys`, and `bubblewrap-sys` declare Apache-2.0 crate metadata. The downloaded runtime also contains libkrun firmware, e2fsprogs programs, bubblewrap, a guest agent, and a shim, so crate metadata alone is not a sufficient binary notices inventory.
+
+Pando vendors the published BoxLite 0.9.7 Rust crate with two narrow patches.
+The Linux shim receives `GODEBUG=netdns=go`; without it, the statically linked
+shim can enter glibc NSS through Go's cgo resolver and segfault on the first
+guest DNS request. BoxLite's active disk-rootfs path also omits an unused empty
+shared virtiofs device, preserving an x86_64 virtio IRQ for networking when a
+standard colocated `jj` workspace needs three validated directory mounts. The
+native runtime archive is unchanged. Live release qualification verifies DNS,
+HTTPS, and the complete colocated-`jj` workflow from the guest.
 
 BoxLite 0.9.7's crate would ordinarily download its native runtime without a
 Pando-controlled checksum. Pando's release and Linux source-formula paths instead

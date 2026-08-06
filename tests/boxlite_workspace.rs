@@ -56,8 +56,19 @@ fn non_jj_and_native_jj_workspaces_run_tools_and_preserve_isolation() {
         .parse()
         .unwrap();
     assert!((200_000..=300_000).contains(&memory_kib), "{limits}");
-    assert!(limits.contains("interfaces=dummy0,lo,"), "{limits}");
-    assert!(limits.contains("default_routes=0"), "{limits}");
+    assert!(limits.contains("interfaces="), "{limits}");
+    assert!(limits.contains("eth0"), "{limits}");
+    assert!(limits.contains("default_routes=1"), "{limits}");
+    command(&home, &source)
+        .args([
+            "exec",
+            "demo",
+            "--",
+            "sh",
+            "-c",
+            "wget -q -O /dev/null https://example.com",
+        ])
+        .assert_success();
     command(&home, &source)
         .args([
             "exec",
@@ -160,7 +171,7 @@ fn non_jj_and_native_jj_workspaces_run_tools_and_preserve_isolation() {
     assert_eq!(info["runtime"]["image"], "alpine:3.22");
     assert_eq!(info["runtime"]["cpu_count"], 1);
     assert_eq!(info["runtime"]["memory_mib"], 256);
-    assert_eq!(info["runtime"]["network"], "disabled");
+    assert_eq!(info["runtime"]["network"], "enabled");
     assert_eq!(info["runtime"]["seccomp"], common::expected_seccomp_json());
     assert_eq!(info["runtime"]["state"], "running");
     let provider_id = info["runtime"]["provider_id"].as_str().unwrap().to_owned();
@@ -382,6 +393,16 @@ fn run_jj_workspace_workflow(fixture: &Path, home: &Path) {
         String::from_utf8(guest_jj.stdout).unwrap().trim(),
         "/usr/local/bin/jj"
     );
+    command(home, &source)
+        .args([
+            "exec",
+            "jjdemo",
+            "--",
+            "sh",
+            "-c",
+            "test -e /sys/class/net/eth0 && awk 'NR > 1 && $2 == \"00000000\" { found=1 } END { exit !found }' /proc/net/route && wget -q -O /dev/null https://example.com",
+        ])
+        .assert_success();
     assert!(!workspace.join("guest-jj").exists());
     assert!(!workspace.join(".jj/pando-tools-stage").exists());
     command(home, &source)

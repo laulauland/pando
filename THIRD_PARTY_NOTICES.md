@@ -1,9 +1,12 @@
 # Third-party runtime notices
 
 The Linux x86_64 Pando binary embeds the native runtime distributed with
-BoxLite 0.9.7. Pando does not modify these components. The release attaches a
-`boxlite-runtime-sources-<pando-version>.tar.gz` source bundle containing the exact source
-revisions listed below.
+BoxLite 0.9.7. Pando does not modify the native components. Pando's source tree
+vendors the published BoxLite Rust crate with narrow patches that select Go's
+native DNS resolver on Linux and omit an unused empty shared virtiofs device
+from BoxLite's disk-rootfs path. The release attaches a
+`boxlite-runtime-sources-<pando-version>.tar.gz` source bundle containing the exact
+native source revisions listed below.
 
 | Component | Embedded use | Source revision | License |
 | --- | --- | --- | --- |

@@ -46,6 +46,7 @@ pub struct RuntimeMetadata {
 
 fn legacy_runtime_policy() -> RuntimePolicy {
     RuntimePolicy {
+        network: crate::runtime::RuntimeNetworkPolicy::Disabled,
         seccomp: crate::runtime::RuntimeSeccompPolicy::LegacyUnqualifiedProvider,
         ..RuntimePolicy::default()
     }
@@ -603,7 +604,7 @@ workspace_path = "/workspace"
     }
 
     #[test]
-    fn legacy_runtime_metadata_never_claims_seccomp_was_required() {
+    fn legacy_runtime_metadata_preserves_its_restricted_security_posture() {
         let state_dir = tempfile::tempdir().unwrap();
         std::fs::write(
             metadata_path(state_dir.path()),
@@ -620,9 +621,14 @@ image = "alpine:3.22"
         .unwrap();
 
         let read = read_metadata(state_dir.path()).unwrap();
+        let policy = read.runtime.unwrap().policy;
         assert_eq!(
-            read.runtime.unwrap().policy.seccomp,
+            policy.seccomp,
             crate::runtime::RuntimeSeccompPolicy::LegacyUnqualifiedProvider
+        );
+        assert_eq!(
+            policy.network,
+            crate::runtime::RuntimeNetworkPolicy::Disabled
         );
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "pando"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 description = "Isolated copy-on-write workspaces with native jj integration"
@@ -43,6 +43,9 @@ toml = "0.8"
 
 [dev-dependencies]
 proptest = "1.5"
+
+[patch.crates-io]
+boxlite = { path = "vendor/boxlite-0.9.7" }
 
 # Unpublished qualification artifacts retain lifecycle crash injection so the
 # exact packaged executable can run the interrupted-create/remove matrix.

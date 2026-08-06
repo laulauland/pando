@@ -58,6 +58,7 @@ fn validate_linux_kvm_at(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RuntimeNetworkPolicy {
+    Enabled,
     Disabled,
 }
 
@@ -83,7 +84,7 @@ impl Default for RuntimePolicy {
         Self {
             cpu_count: DEFAULT_CPU_COUNT,
             memory_mib: DEFAULT_MEMORY_MIB,
-            network: RuntimeNetworkPolicy::Disabled,
+            network: RuntimeNetworkPolicy::Enabled,
             seccomp: RuntimeSeccompPolicy::Required,
         }
     }
@@ -296,8 +297,8 @@ pub trait RuntimeBackend {
 #[cfg(feature = "microvm-boxlite")]
 mod boxlite_backend {
     use super::{
-        RuntimeBackend, RuntimeCommand, RuntimeIdentity, RuntimeInfo, RuntimeSpec, RuntimeStatus,
-        GUEST_JJ_STAGE_PATH, GUEST_WORKSPACE_PATH,
+        RuntimeBackend, RuntimeCommand, RuntimeIdentity, RuntimeInfo, RuntimeNetworkPolicy,
+        RuntimeSpec, RuntimeStatus, GUEST_JJ_STAGE_PATH, GUEST_WORKSPACE_PATH,
     };
     use crate::home::boxlite_runtime_home;
     use anyhow::{anyhow, bail, Context, Result};
@@ -422,7 +423,12 @@ mod boxlite_backend {
                 cpus: Some(spec.policy.cpu_count),
                 memory_mib: Some(spec.policy.memory_mib),
                 rootfs: RootfsSpec::Image(spec.image),
-                network: NetworkSpec::Disabled,
+                network: match spec.policy.network {
+                    RuntimeNetworkPolicy::Enabled => NetworkSpec::Enabled {
+                        allow_net: Vec::new(),
+                    },
+                    RuntimeNetworkPolicy::Disabled => NetworkSpec::Disabled,
+                },
                 auto_remove: false,
                 detach: true,
                 advanced,
@@ -1671,7 +1677,15 @@ pub use boxlite_backend::BoxLiteRuntimeBackend;
 
 #[cfg(test)]
 mod policy_tests {
-    use super::{RuntimePolicy, RuntimeSeccompPolicy};
+    use super::{RuntimeNetworkPolicy, RuntimePolicy, RuntimeSeccompPolicy};
+
+    #[test]
+    fn new_runtime_policy_enables_networking() {
+        assert_eq!(
+            RuntimePolicy::default().network,
+            RuntimeNetworkPolicy::Enabled
+        );
+    }
 
     #[test]
     fn resource_limits_reject_out_of_range_values() {

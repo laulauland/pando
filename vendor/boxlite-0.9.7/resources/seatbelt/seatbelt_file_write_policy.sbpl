@@ -1,0 +1,50 @@
+; ============================================================================
+; BoxLite macOS Seatbelt File Write Policy
+; ============================================================================
+;
+; Static write paths for temporary files.
+; These are needed by many tools and libraries for temporary storage.
+;
+; Box shared directory, box-scoped tmp, and user volumes are added dynamically
+; by seatbelt.rs.
+;
+; Why these paths are needed:
+;   - /private/tmp: Standard temporary directory (macOS canonical path).
+;     Required for the short binding-symlink parent `/tmp/bl-{uid}/{box_id}`
+;     (see src/boxlite/src/net/socket_path.rs — moved here in #742) and any
+;     tools using TempDir::new_in("/tmp").
+;   - /private/var/tmp: Alternative temporary directory used by some libs.
+;
+; NOT allowed (intentionally narrower than older revisions):
+;   - /private/var/folders ($TMPDIR / DARWIN_USER_*_DIR): the shim's TMPDIR is
+;     redirected to the box-scoped tmp dir by configure_env() in
+;     src/boxlite/src/vmm/controller/spawn.rs whenever the built-in seatbelt
+;     profile is in effect, so the whole per-user temp tree never needs to be
+;     writable. Granting it would cover the entire per-user temp/cache tree
+;     (browser caches, app sqlite, token caches, …) for a dependency the shim
+;     no longer has. If you re-add a write grant here, scope it to a single
+;     subpath (e.g. via `sandbox-exec -D` like DARWIN_USER_CACHE_DIR), not the
+;     full tree.
+;   - ~/.boxlite (could affect other boxes, image cache)
+;   - {box_dir} entirely (only shared/ and tmp/ subdirectories, added dynamically)
+;   - System paths
+;
+; ============================================================================
+
+(allow file-write*
+    ; === Temporary Directories ===
+    ; Many tools and libraries need to write temporary files
+    ; Using canonical paths (/private/tmp instead of /tmp symlink)
+    (subpath "/private/tmp")
+    (subpath "/private/var/tmp")
+)
+
+; ============================================================================
+; END OF STATIC FILE WRITE POLICY
+; ============================================================================
+; Dynamic write paths added by seatbelt.rs:
+;   - {box_dir}/shared/ (guest-visible directory)
+;   - {box_dir}/tmp/ (box-scoped TMPDIR for shim + libkrun transient files)
+;   - {box_dir}/sockets/ + /tmp/bl-{uid}/{box_id}/ (gvproxy + control sockets)
+;   - User volumes with read_only=false
+; ============================================================================

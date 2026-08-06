@@ -9,7 +9,7 @@ host-only workspace. `--no-runtime` always forces that behavior.
 
 ## Availability
 
-Pando 0.4 runtime support is qualified only on Linux x86_64 with KVM API version
+Pando 0.5 runtime support is qualified only on Linux x86_64 with KVM API version
 12. The official Linux x86_64 release and Homebrew bottle include BoxLite.
 Release binaries for Apple Silicon retain host-only workspace behavior;
 `--runtime boxlite` reports that the release does not include runtime support.
@@ -101,32 +101,31 @@ memory_mib = 2048
 allow_unqualified_seccomp = true
 ```
 
-Dependencies must already exist in the workspace or image, or be installable
-from an included offline cache. For Bun, use
-`bun install --frozen-lockfile --offline` when such a cache is present.
+Tools can fetch dependencies into the persistent workspace or guest root disk.
+For Bun, use `bun install --frozen-lockfile` to keep the resolved dependency
+graph aligned with the lockfile.
 
-## Network boundary
+## Networking
 
-Networking is always disabled in this release. BoxLite gives the guest loopback
-and an unconnected dummy interface, with no default route. Pando intentionally
-has no network-enable flag.
+New VMs have outbound networking enabled, including DNS and HTTPS. There is no
+per-workspace networking flag in this release: every BoxLite runtime uses the
+same enabled policy.
 
-This is a runtime constraint as well as a security policy. A standard colocated
-`jj` workspace can require three virtiofs mounts: `/workspace`, the canonical
-`jj` repository store, and the colocated Git store. With BoxLite 0.9.7 and
-libkrun, adding a network device to that topology can exhaust the available
-virtio IRQs. Pando therefore fails closed instead of exposing a network mode
-that works only for some repository layouts.
+BoxLite's disk-backed rootfs only needs `/run/boxlite/shared` as a guest-side
+mountpoint. Pando's vendored BoxLite patch omits the otherwise empty shared
+virtiofs device, leaving enough x86_64 virtio IRQ capacity for networking plus
+the three mounts used by a standard colocated `jj` workspace: `/workspace`, the
+canonical `jj` repository store, and the colocated Git store. Those three
+validated mounts remain separate; the canonical working copy is not exposed.
 
 ## Linux seccomp boundary
 
 Pando fails closed by default on Linux because BoxLite 0.9.7's bundled seccomp
 profile terminates the qualified libkrun path with `SIGSYS`.
 `--allow-unqualified-seccomp` explicitly acknowledges running with that provider
-filter disabled. VM isolation, the BoxLite jailer, sealed mounts, resource
-limits, and disabled networking remain active, but this is not equivalent to a
-qualified seccomp sandbox. macOS uses Hypervisor.framework and does not expose
-this override.
+filter disabled. VM isolation, the BoxLite jailer, sealed mounts, and resource
+limits remain active, but this is not equivalent to a qualified seccomp
+sandbox. macOS uses Hypervisor.framework and does not expose this override.
 
 ## Shared-filesystem boundary
 
@@ -156,4 +155,3 @@ runtime and installs it at `/usr/local/bin/jj` on the persistent guest root disk
 The temporary staging copy is removed before creation commits. This makes
 `pando exec feature-x -- jj status` work with minimal images without exposing
 host tool directories.
-
