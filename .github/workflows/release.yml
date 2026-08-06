@@ -2,6 +2,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Fallback when a tag push event is not delivered by the credential provider.
   workflow_dispatch:
 
 permissions:
